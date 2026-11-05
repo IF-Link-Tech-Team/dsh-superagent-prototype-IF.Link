@@ -83,12 +83,17 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/** Verify the agent's GitHub CLI identity and push access to the configured repository; returns no `github` when the Source is off. */
+export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? '', enabled = true): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
-  if (!remote) throw new SetupError('repositoryUnset')
+  // A deployment without a GitHub Source needs no repository, CLI or push access; only an enabled Source must resolve.
+  // The placeholder keeps every GitHub-dependent path inert: the Source is off, so nothing polls or asks for a PR.
+  if (!remote) {
+    if (!enabled) return { ...machine, repository: '', github: { cli: 'gh', login: '', noreply: '' } }
+    throw new SetupError('repositoryUnset')
+  }
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
