@@ -1,9 +1,9 @@
 /** SQLite persistence for domain aggregates, key-value state, settings history, and the channel outbox. */
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import { chmodSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
-import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type Repositories, type Thread, type ThreadFact,
-  type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
+import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { key, reasonText, threadKey, type ChannelRef, type Decision, type OutboundMessage, type Reason, type ReplyStatus, type Repositories,
+  type Thread, type ThreadFact, type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
 import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
@@ -18,6 +18,15 @@ export type DropReason = 'channelGone' | 'channelIgnored'
 export interface Receipt extends OutboundMessage { status: ReplyStatus; dropped?: { at: string; reason: DropReason } }
 /** A dropped outbound message receipt, with the timestamp and reason it was dropped. */
 export type Dropped = Receipt & { dropped: { at: string; reason: DropReason } }
+/** A journal entry the index serves; anything else, a path traversal included, is not one. */
+const JOURNAL_FILE = /^[A-Za-z0-9_-]+\.md$/
+/** One ranked full-text match: the record's kind and id, its own time, and a snippet of its searchable text. */
+export interface SearchMatch { kind: string; ref: string; at: string; snippet: string }
+/** The searchable text of a ticket: its title, and the latest assignment's report summary when it has one. */
+const ticketText = (ticket: Ticket): string => [ticket.title, ticket.assignments.at(-1)?.report?.summary ?? ''].filter(part => part.trim()).join('\n')
+/** The searchable text of a decision: its reasons in words, with one an earlier version stored as a string kept as written. */
+const decisionText = (decision: Decision): string => (Array.isArray(decision.reason) ? decision.reason as unknown[] : [])
+  .map(reason => typeof reason === 'string' ? reason : reasonText([reason as Reason])).join('; ')
 /** Saved settings snapshot with the policy version and ticket notifications it produced (`internal` saves have no origin). */
 export interface SettingsVersion {
   revision: number; savedAt: string; source: SettingsOrigin | 'internal'; block?: SettingsSave
@@ -80,6 +89,7 @@ export class Store implements Repositories {
             CREATE TABLE IF NOT EXISTS effect (kind TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, seq INTEGER NOT NULL,
               generation INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', due INTEGER NOT NULL,
               since TEXT NOT NULL, PRIMARY KEY (kind, key));
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(body, kind UNINDEXED, ref UNINDEXED, at UNINDEXED, tokenize='trigram');
             CREATE INDEX IF NOT EXISTS trigger_at ON trigger(at);
             CREATE INDEX IF NOT EXISTS trigger_thread_at ON trigger_thread(thread, at);
             CREATE INDEX IF NOT EXISTS decision_thread ON decision(thread);
@@ -94,6 +104,8 @@ export class Store implements Repositories {
         const reason = error instanceof Error ? error.message : String(error)
         throw new Error(`The orchestrator database is unchanged at schema ${version}: its migration to schema ${SCHEMA_VERSION} failed: ${reason}`, { cause: error })
       }
+      // The index is derived from the three tables, so a database opened before search existed gets it from its rows, not a migration.
+      if (migrating || !this.searchIsIndexed()) this.rebuildSearch()
     } catch (error) {
       this.db.close()
       throw error
@@ -129,6 +141,80 @@ export class Store implements Repositories {
     this.db.prepare('DELETE FROM trigger_thread WHERE id=?').run(trigger.id)
     const insert = this.db.prepare('INSERT OR IGNORE INTO trigger_thread VALUES (?,?,?,?)')
     for (const ref of trigger.threads) insert.run(threadKey(ref), trigger.id, trigger.at, trigger.human ? 1 : 0)
+  }
+  /** Replace the searchable text of one record; an empty body removes it. */
+  private indexSearch(kind: string, ref: string, at: string, body: string): void {
+    this.db.prepare('DELETE FROM search_fts WHERE kind=? AND ref=?').run(kind, ref)
+    if (body.trim()) this.db.prepare('INSERT INTO search_fts(body, kind, ref, at) VALUES (?,?,?,?)').run(body, kind, ref, at)
+  }
+  /**
+   * Whether the index holds a row for each record with searchable text. The expected count mirrors the bodies the save methods
+   * index, so a database written before the index existed is rebuilt while one this build keeps in sync is left alone.
+   */
+  private searchIsIndexed(): boolean {
+    const row = this.db.prepare(`SELECT
+      (SELECT count(*) FROM search_fts WHERE kind <> 'journal') AS indexed,
+      (SELECT count(*) FROM trigger WHERE trim(coalesce(value ->> '$.text', ''), char(9) || char(10) || char(13) || ' ') <> '')
+        + (SELECT count(*) FROM ticket WHERE trim(coalesce(value ->> '$.title', ''), char(9) || char(10) || char(13) || ' ') <> ''
+          OR trim(coalesce(value ->> '$.assignments[#-1].report.summary', ''), char(9) || char(10) || char(13) || ' ') <> '')
+        + (SELECT count(*) FROM decision WHERE EXISTS (SELECT 1 FROM json_each(decision.value, '$.reason') AS reason
+          WHERE trim(coalesce(reason.value ->> '$.code', '')) <> '')) AS expected`).get()
+    return Number(row?.indexed) === Number(row?.expected)
+  }
+  /** Rebuilds the derived index from the three tables in one transaction. */
+  private rebuildSearch(): void {
+    this.atomic(() => {
+      this.db.exec('DELETE FROM search_fts')
+      for (const trigger of this.values<Trigger>('SELECT value FROM trigger')) this.indexSearch('trigger', trigger.id, trigger.at, trigger.text)
+      for (const ticket of this.values<Ticket>('SELECT value FROM ticket')) this.indexSearch('ticket', ticket.id, ticket.updatedAt || ticket.createdAt, ticketText(ticket))
+      for (const decision of this.values<Decision>('SELECT value FROM decision')) this.indexSearch('decision', decision.id, decision.at, decisionText(decision))
+    })
+    this.journalSignature = ''
+  }
+  /** Signature of the journal files the last synchronization indexed, so a search rewrites them only when they change. */
+  private journalSignature = ''
+  /**
+   * Index the journal entries under `dir/journal` alongside tickets, triggers and decisions.
+   * Cheap when nothing changed: names, sizes and modification times are compared first, so a search does not re-read the files.
+   */
+  indexJournal(dir: string): void {
+    const root = join(dir, 'journal')
+    let names: string[]
+    try { names = readdirSync(root).filter(name => JOURNAL_FILE.test(name)).sort() } catch { names = [] }
+    const signature = names.map(name => {
+      try { const info = statSync(join(root, name)); return `${name}:${info.size}:${info.mtimeMs}` } catch { return name }
+    }).join('|')
+    if (signature === this.journalSignature) return
+    this.atomic(() => {
+      this.db.prepare("DELETE FROM search_fts WHERE kind='journal'").run()
+      for (const name of names) {
+        try { this.indexSearch('journal', name, '', readFileSync(join(root, name), 'utf8')) } catch { /* A file that vanished mid-scan simply is not indexed. */ }
+      }
+    })
+    this.journalSignature = signature
+  }
+  /**
+   * Ranked matches across tickets, triggers and decisions; `kinds` limits which, and a query under three characters falls back
+   * to a substring scan because the trigram tokenizer cannot match it.
+   */
+  search(query: string, options: { kinds?: readonly string[]; limit?: number } = {}): SearchMatch[] {
+    const text = query.trim()
+    if (!text) return []
+    const limit = Math.min(Math.max(1, Math.trunc(options.limit ?? 10)), 50)
+    const kinds = options.kinds ?? []
+    const filter = kinds.length ? ` AND kind IN (${kinds.map(() => '?').join(',')})` : ''
+    // Quote the query as one phrase, doubling quotes, so FTS5 syntax characters in user input are searched for, not interpreted.
+    if ([...text].length >= 3) {
+      const phrase = `"${text.replaceAll('"', '""')}"`
+      return this.db.prepare(`SELECT kind, ref, at, snippet(search_fts, 0, '[', ']', '…', 12) AS snippet FROM search_fts
+        WHERE search_fts MATCH ?${filter} ORDER BY rank LIMIT ?`).all(phrase, ...kinds, limit)
+        .map(row => ({ kind: String(row.kind), ref: String(row.ref), at: String(row.at), snippet: String(row.snippet) }))
+    }
+    // A shorter query cannot be a trigram, so it keeps the same result shape by scanning for the substring instead.
+    const pattern = `%${text.replace(/[\\%_]/g, match => `\\${match}`)}%`
+    return this.db.prepare(`SELECT kind, ref, at, substr(body, max(1, instr(lower(body), lower(?)) - 8), 40) AS snippet FROM search_fts
+      WHERE body LIKE ? ESCAPE '\\'${filter} ORDER BY at DESC, rowid ASC LIMIT ?`).all(text, pattern, ...kinds, limit)
+      .map(row => ({ kind: String(row.kind), ref: String(row.ref), at: String(row.at), snippet: String(row.snippet) }))
   }
   private depth = 0
   /** Callbacks queued to run once the outermost transaction commits, indexed by savepoint level; rolling back a level discards its callbacks. */
@@ -203,6 +289,7 @@ export class Store implements Repositories {
     save: (trigger: Trigger): void => this.atomic(() => {
       this.db.prepare('INSERT INTO trigger VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, at=excluded.at').run(trigger.id, JSON.stringify(trigger), trigger.at)
       this.indexThreads(trigger)
+      this.indexSearch('trigger', trigger.id, trigger.at, trigger.text)
     }),
     disposition: (id: string): TriggerDisposition | undefined => { const row = this.db.prepare('SELECT value FROM disposition WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as TriggerDisposition : undefined },
     saveDisposition: (id: string, value: TriggerDisposition): void => { this.db.prepare('INSERT INTO disposition VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(id, JSON.stringify(value)) },
@@ -232,7 +319,10 @@ export class Store implements Repositories {
   }
   readonly tickets = {
     get: (id: string): Ticket | undefined => { const row = this.db.prepare('SELECT value FROM ticket WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Ticket : undefined },
-    save: (ticket: Ticket): void => { this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket)) },
+    save: (ticket: Ticket): void => this.atomic(() => {
+      this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket))
+      this.indexSearch('ticket', ticket.id, ticket.updatedAt || ticket.createdAt, ticketText(ticket))
+    }),
     /** Newest first. */
     list: (): Ticket[] => this.values('SELECT value FROM ticket ORDER BY rowid DESC'),
     /** Newest first. */
@@ -242,7 +332,10 @@ export class Store implements Repositories {
   }
   readonly decisions = {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },
-    save: (decision: Decision): void => { this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision)) },
+    save: (decision: Decision): void => this.atomic(() => {
+      this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision))
+      this.indexSearch('decision', decision.id, decision.at, decisionText(decision))
+    }),
     byThread: (threadKeyValue: string): Decision[] => this.db.prepare('SELECT value FROM decision WHERE thread=? ORDER BY rowid').all(threadKeyValue).map(row => JSON.parse(String(row.value)) as Decision),
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */

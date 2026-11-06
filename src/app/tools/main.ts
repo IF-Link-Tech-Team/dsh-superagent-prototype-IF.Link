@@ -20,7 +20,7 @@ const RoutingNoteSchema = z.string().trim()
 export interface MainToolsHost {
   readonly context: Context
   readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings' | 'search' | 'indexJournal'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
@@ -157,6 +157,21 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   return [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
+    tool({
+      name: 'orchestrator_search',
+      description: 'Find past work by keyword across tickets, triggers, decisions and the team journal, and return ranked snippets with the resource each match reads. Read the one you need with orchestrator_read; the snippet is not the record.',
+      schema: z.object({
+        query: z.string().trim().min(1),
+        in: z.enum(['ticket', 'trigger', 'decision', 'journal']).optional(),
+        limit: z.number().int().min(1).max(50).optional(),
+      }).strict(),
+      execute: async args => {
+        // Journal entries live on disk, so bring the index up to date before searching it; unchanged files cost a stat each.
+        host.store.indexJournal(resources.memoryDir)
+        return { matches: host.store.search(args.query, { ...(args.in ? { kinds: [args.in] } : {}), ...(args.limit ? { limit: args.limit } : {}) })
+          .map(match => ({ ...match, read: `${match.kind}/${match.ref}` })) }
+      },
+    }),
     routeTool(host),
     tool({
       name: 'orchestrator_ticket_retry',
