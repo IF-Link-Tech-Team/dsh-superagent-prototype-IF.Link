@@ -10,10 +10,24 @@ import { validItems, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
 import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
   from './feishu-trigger.ts'
-import { health, type SourceContext } from './host.ts'
+import { health, type Health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
 import type { FeishuConfig } from './feishu.ts'
+
+/** Rounds (one per minute) a single chat must fail in a row before `history` turns red. */
+const HISTORY_FAILURE_ROUNDS = 3
+
+/**
+ * Returns an error health once one chat has failed `HISTORY_FAILURE_ROUNDS` rounds in a row, or undefined so a single
+ * flaky round (Feishu occasionally answers 2200 for one chat and recovers by itself) keeps `history` green.
+ */
+export function historyFailureHealth(failures: ReadonlyMap<string, number>, errors: readonly string[]): Health | undefined {
+  const rounds = Math.max(0, ...failures.values())
+  return rounds >= HISTORY_FAILURE_ROUNDS
+    ? health('error', 'pollFailures', { count: String(rounds), error: errors.join(' / ') })
+    : undefined
+}
 
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
   Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
@@ -128,6 +142,10 @@ async function chatNamesLoop(ctx: SourceContext, signal: AbortSignal): Promise<v
 async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   if (!available(ctx)) { ctx.report('history', health('paused', 'feishuBotMissing')); return }
+  // Consecutive failures per chat. Feishu occasionally answers 2200 for a single chat and recovers on its own;
+  // one flaky round must not turn the whole component red, so only a chat failing HISTORY_FAILURE_ROUNDS rounds
+  // in a row is reported. Counters live in memory: a restart is a fresh start, and no stale count survives a night.
+  const failures = new Map<string, number>()
   while (!signal.aborted) {
     const config = enabled(ctx)
     if (!config) {
@@ -149,13 +167,19 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
       try {
         await backfillChat(ctx, chatId, direct, since, started, signal, tally)
         if (!signal.aborted) ctx.state.set(cursorKey, cursorAt(started))
-      } catch (error) { if (!signal.aborted) errors.push(`${chatId}: ${String(error)}`) }
+        failures.delete(chatId)
+      } catch (error) {
+        if (signal.aborted) continue
+        failures.set(chatId, (failures.get(chatId) ?? 0) + 1)
+        errors.push(`${chatId}: ${String(error)}`)
+      }
     }
     await pollThreads(ctx, signal, tally)
+    for (const chatId of failures.keys()) if (!(chatId in chats)) failures.delete(chatId)
     const skipped = tally.skipped ? `; ${tally.skipped} unreadable messages skipped` : ''
-    if (!signal.aborted) ctx.report('history', errors.length
-      ? { state: 'error', detail: errors.join('\n') }
-      : { state: 'ready', detail: `Configured groups and known direct chats recovered${skipped}`, at: new Date().toISOString() })
+    const retrying = errors.length ? `; ${errors.length} chat(s) failed this round, retrying` : ''
+    if (!signal.aborted) ctx.report('history', historyFailureHealth(failures, errors) ?? {
+      state: 'ready', detail: `Configured groups and known direct chats recovered${skipped}${retrying}`, at: new Date().toISOString() })
     await delay(60_000, undefined, { signal }).catch(() => {})
   }
 }

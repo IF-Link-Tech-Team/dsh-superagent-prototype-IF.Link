@@ -4,7 +4,7 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
-import { runFeishu } from '../src/sources/feishu-loops.ts'
+import { historyFailureHealth, runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
@@ -1018,6 +1018,22 @@ describe('source context', () => {
     h.store.close()
   })
 })
+it('reports history as failing only after a chat fails three rounds in a row', () => {
+  const failures = new Map([['oc_a', 1]])
+  const errors = ['oc_a: Error: rate limited']
+  expect(historyFailureHealth(failures, errors)).toBeUndefined()
+  failures.set('oc_a', 2)
+  expect(historyFailureHealth(failures, errors)).toBeUndefined()
+  failures.set('oc_a', 3)
+  expect(historyFailureHealth(failures, errors)).toEqual({ state: 'error',
+    detail: '3 consecutive failed polls; last: oc_a: Error: rate limited', code: 'pollFailures',
+    values: { count: '3', error: 'oc_a: Error: rate limited' } })
+  // One healthy chat failing twice while another failed three times in a row still reports the worst count.
+  failures.set('oc_b', 2)
+  expect(historyFailureHealth(failures, errors)).toMatchObject({ values: { count: '3' } })
+  failures.delete('oc_a')
+  expect(historyFailureHealth(failures, errors)).toBeUndefined()
+})
 it('reports GitHub as failing only after the configured number of consecutive failed polls', () => {
   const eof = new Error('Get "https://api.github.com/x": EOF')
   expect(pollFailure(1, 3, eof)).toBeUndefined()
@@ -1135,7 +1151,8 @@ describe('feishu event consumer', () => {
     }
     const on = await recovered(true)
     expect(on.chats).toEqual(['oc_a', 'oc_b', 'oc_dm'])
-    expect(on.history).toMatchObject({ state: 'error', detail: expect.stringContaining('oc_a: Error: rate limited') })
+    // A single flaky round keeps `history` green; the chat's cursor stays put so the next round retries it.
+    expect(on.history).toMatchObject({ state: 'ready', detail: expect.stringContaining('1 chat(s) failed this round') })
     expect(on.cursors.oc_a).toBe(hour)
     expect(Date.parse(on.cursors.oc_b!)).toBeGreaterThan(Date.parse(hour))
     expect(Date.parse(on.cursors.oc_dm!)).toBeGreaterThan(Date.parse(hour))
