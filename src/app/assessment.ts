@@ -15,8 +15,8 @@ import { textPage } from './context.ts'
 import { AcknowledgementSchema } from './tools/tool.ts'
 import type { Effects } from './effects.ts'
 
-/** Schema for a short lowercase kebab-case English ticket worktree name (1–4 words, at most 32 characters). */
-export const WorktreeNameSchema = z.string().max(32).regex(/^[a-z]+(?:-[a-z0-9]+){0,3}$/, 'Use 1–4 short English words in lowercase kebab-case, at most 32 characters').describe('Meaningful short English ticket name, e.g. fix-plan-color. Translate Chinese titles into English; no Chinese, pinyin or generic ticket names. 1–4 lowercase words in kebab-case, at most 32 characters.')
+/** Schema for a short ticket directory name: 1–6 words in any script, joined by `-` or `_`, at most 40 characters. */
+export const WorktreeNameSchema = z.string().max(40).regex(/^[\p{L}\p{N}]+(?:[-_][\p{L}\p{N}]+){0,5}$/u, 'Use 1–6 short parts joined by - or _, at most 40 characters').describe('Meaningful short ticket directory name in the source language, e.g. 修复按钮 or fix-plan-color. No paths, spaces or generic names. 1–6 short parts joined by - or _, at most 40 characters.')
 /** Schema for the main Session's proactive candidate assessment decision (`orchestrator_eval_decide`). */
 export const AssessmentSchema = z.object({
   decision: z.enum(['accept', 'ignore', 'unavailable']),

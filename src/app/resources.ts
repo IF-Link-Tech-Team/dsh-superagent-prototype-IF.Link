@@ -1,4 +1,6 @@
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
+import { readdir, readFile, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
@@ -48,6 +50,10 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'prompts/<revision>', holds: 'one prompt version by number, or current, the one the Session works under', executor: true },
   { name: 'prompts/defaults', holds: 'the built-in prompt configuration, and the built-in parts by the key an override names' },
   { name: 'prompt-preview/<id>', holds: 'a composed prompt that orchestrator_prompts_save previewed' },
+  { name: 'memory', holds: 'the team memory files this deployment keeps, each with its size and last update, so a Session reads only what a question needs', executor: true },
+  { name: 'memory/<file>', holds: 'one team memory file whole, such as TEAM.md or PROJECTS.md', executor: true },
+  { name: 'journal', holds: 'the team journal entries, newest first, each with its date range, size and last update', executor: true },
+  { name: 'journal/<file>', holds: 'one journal entry whole, such as 2026-10-05_10-11.md', executor: true },
   { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
@@ -63,6 +69,8 @@ export interface ResourceHost {
   readonly commands: Commands
   readonly masterId: string
   readonly context: Context
+  /** Directory holding the team memory files and their `journal/` entries; each ticket also copies the memory files in. */
+  readonly memoryDir: string
   promptVersion(sessionId: string): PromptVersion
   /** Whether a Session may read `revision` (the revision it currently runs under or any revision it ran under previously). */
   mayRead(sessionId: string, revision: number): boolean
@@ -89,6 +97,32 @@ function list<T>({ offset, limit }: Read, fetch: (offset: number, count: number)
   const size = Math.min(limit ?? 20, 50)
   const items = fetch(offset, size + 1)
   return { items: items.slice(0, size), next_offset: items.length > size ? offset + size : null }
+}
+/** A file name `memory/` serves; anything else, a path traversal included, is not a memory file. */
+const MEMORY_FILE = /^[A-Za-z0-9_-]+\.md$/
+/** One journal entry's first heading, which readers see instead of the file name. */
+const journalTitle = (body: string): string => (body.split('\n').find(line => line.startsWith('# ')) ?? '').replace(/^#\s*/, '')
+/** Describe the journal entries a deployment keeps, newest first; a missing directory is an empty list, not an error. */
+async function journalIndex(dir: string) {
+  const root = join(dir, 'journal')
+  const names = (await readdir(root).catch(() => [] as string[])).filter(name => MEMORY_FILE.test(name)).sort().reverse()
+  return Promise.all(names.map(async file => {
+    const [body, info] = await Promise.all([readFile(join(root, file), 'utf8').catch(() => ''),
+      stat(join(root, file)).catch(() => undefined)])
+    return { file, title: journalTitle(body), chars: body.length, updated: info === undefined ? '' : info.mtime.toISOString(), read: `journal/${file}` }
+  }))
+}
+/**
+ * Describe the memory files a deployment keeps, by name, size and update time.
+ * A missing directory is an empty list rather than an error: memory is optional, and saying so is more useful than failing the read.
+ */
+async function memoryIndex(dir: string) {
+  const names = (await readdir(dir).catch(() => [] as string[])).filter(name => MEMORY_FILE.test(name)).sort()
+  return Promise.all(names.map(async file => {
+    const [body, info] = await Promise.all([readFile(join(dir, file), 'utf8').catch(() => ''),
+      stat(join(dir, file)).catch(() => undefined)])
+    return { file, chars: body.length, updated: info === undefined ? '' : info.mtime.toISOString(), read: `memory/${file}` }
+  }))
 }
 /** Check whether a worker session's ticket is authorized to read a trigger (via delivery, ticket origin, or followed thread). */
 const readable = (host: ResourceHost, ticket: Ticket, trigger: Trigger): boolean => reached(ticket, trigger, key => host.store.threads.get(key))
@@ -186,6 +220,28 @@ const ROUTES: readonly Route[] = [
   ['prompt-preview/', read => {
     const body = main(read).pages.get(`${read.sessionId}:${read.resource}`)
     if (body === undefined) throw new Error('Unknown preview for this Session')
+    return text(read, body)
+  }],
+  ['memory', async read => {
+    const { host } = read
+    return text(read, JSON.stringify({ files: await memoryIndex(host.memoryDir), read: 'memory/<file>' }))
+  }],
+  ['memory/', async read => {
+    const { host } = read
+    const file = read.rest
+    if (!MEMORY_FILE.test(file)) throw new Error('Unknown memory file')
+    const body = await readFile(join(host.memoryDir, file), 'utf8').catch(() => undefined)
+    if (body === undefined) throw new Error(`No memory file ${file} in ${host.memoryDir}`)
+    return text(read, body)
+  }],
+  ['journal', async read => {
+    return text(read, JSON.stringify({ entries: await journalIndex(read.host.memoryDir), read: 'journal/<file>' }))
+  }],
+  ['journal/', async read => {
+    const file = read.rest
+    if (!MEMORY_FILE.test(file)) throw new Error('Unknown journal entry')
+    const body = await readFile(join(read.host.memoryDir, 'journal', file), 'utf8').catch(() => undefined)
+    if (body === undefined) throw new Error(`No journal entry ${file}`)
     return text(read, body)
   }],
   ['models', async read => {

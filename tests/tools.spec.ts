@@ -171,7 +171,7 @@ it('refuses alone an item that lacks a field its kind needs or breaks a field\'s
   const accept = { kind: 'accept', title: 'Fix', acknowledgement: '收到。' }
   const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
     { ...accept, trigger_id: a },
-    { ...accept, trigger_id: b, worktree_name: 'one-two-three-four-five' },
+    { ...accept, trigger_id: b, worktree_name: 'one/two/three' },
     { ...accept, trigger_id: c, worktree_name: 'fix-c', note: words(NOTE_WORDS + 1) },
     { ...accept, trigger_id: d, worktree_name: 'fix-d', title: '' },
     // Fields of another kind, null or not, are left unread.
@@ -211,7 +211,7 @@ it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps
 it('states each routing field\'s limit in its description, which the schema leaves to the item\'s check', () => {
   type Schema = { parameters: { properties: { decisions: { items: { properties: Record<string, { description?: string }> } } } } }
   const fields = (h.tools.get(h.runtime.masterId)!.get('orchestrator_route') as unknown as Schema).parameters.properties.decisions.items.properties
-  const limits: Record<string, string[]> = { title: ['200 characters'], worktree_name: ['kebab-case', '32 characters'],
+  const limits: Record<string, string[]> = { title: ['200 characters'], worktree_name: ['40 characters'],
     acknowledgement: [`${IM_WORDS} words`], note: [`${NOTE_WORDS} words`, 'Never add implementation instructions'], reason: ['500 characters'] }
   for (const [field, phrases] of Object.entries(limits)) for (const phrase of phrases) expect(fields[field]!.description, field).toContain(phrase)
 })
