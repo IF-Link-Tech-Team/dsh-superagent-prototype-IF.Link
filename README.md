@@ -30,6 +30,13 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
 
+## IF.Link practice notes
+
+The [IF.Link](https://iflink.tech/) team adapted this prototype into a Feishu-based team agent for a
+several-thousand-person AI community. Their requirements, upgrade plan, memory design and prompt
+conventions are collected in [docs/iflink/](docs/iflink/README.md). These are notes on their own
+experience, not part of the prototype's documentation.
+
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.
