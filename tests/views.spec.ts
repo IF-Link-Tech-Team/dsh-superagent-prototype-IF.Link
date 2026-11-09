@@ -49,6 +49,16 @@ it('names the Thread of each dropped message: the one of the Trigger its Channel
     .toEqual({ a: 'feishu:oc_1:om_root', b: 'github:42', c: undefined })
 })
 
+it('keeps the emoji a mark drew with its receipt, and names it in the dropped list', () => {
+  // A mark the Channel could not draw still records what it would have drawn, so the panel shows the same message a person would have seen.
+  const channel = feishuChannel('oc_1', 'om_mark')
+  const mark = { id: 'mark', channel, text: '', kind: 'reaction' as const, reaction: 'received' as const, emoji: 'GoGoGo' }
+  store.receipts.add(mark)
+  store.receipts.settle(mark, 'channelGone')
+  expect(store.receipts.get('mark')).toMatchObject({ status: 'dropped', emoji: 'GoGoGo' })
+  expect(droppedReplies({ store, links }).find(item => item.id === 'mark')).toMatchObject({ emoji: 'GoGoGo' })
+})
+
 function views() {
   store.saveSettings(SettingsSchema.parse({ policy: { sources: { feishu: { allowed: [{ id: 'ou_alice', name: 'Alice' }] },
     github: { allowed: [{ id: 'alice' }] } },

@@ -65,6 +65,7 @@ export function droppedReplies({ store, links }: Pick<ViewHost, 'store' | 'links
     const home = triggerId ? store.triggers.get(triggerId)?.threads[0] : undefined
     const thread = home ? threadKey(home) : store.threads.get(item.channel.thread) ? item.channel.thread : undefined
     return { id: item.id, kind: item.kind, channel: item.channel, preview: preview(item.text), dropped: item.dropped,
+      ...item.emoji ? { emoji: item.emoji } : {},
       ...ticket ? { ticket: { id: ticket.id, title: ticket.title } } : {}, ...thread ? { thread } : {} }
   })
 }

@@ -56,7 +56,7 @@ export class Outbox implements OutboxPort {
       // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
       const result = await sources.send(message, commands)
       if (result === 'waiting') throw new Later('The Source is not installed')
-      store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
+      store.receipts.settle(message, result === 'gone' ? 'channelGone' : 'sent')
     } catch (error) {
       // A mark is a courtesy, and it is queued ahead of the ticket's messages: one failed attempt settles it `failed`, so a
       // Channel that cannot mark keeps neither the mark nor the messages behind it.
