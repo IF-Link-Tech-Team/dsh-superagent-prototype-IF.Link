@@ -187,7 +187,12 @@ export interface ThreadFact { label?: Text; value: Text; problem?: true }
 /** A thread's facts by id, ordered for display; each writer owns its fact ids. */
 export type ThreadFacts = Record<string, ThreadFact>
 
-export type DecisionKind = 'ignore' | 'accept' | 'reopen' | 'stop' | 'unavailable'
+export type DecisionKind = 'ignore' | 'accept' | 'reopen' | 'stop' | 'unavailable' | 'react'
+/** What a social reaction says: the reading of a message that asks for no work but does ask for a gesture. */
+export type GestureIntent = 'celebrate' | 'applause' | 'laugh' | 'comfort' | 'hype' | 'respect' | 'surprise' | 'tease'
+  | 'aww' | 'ouch' | 'thanks' | 'agree'
+/** How much a message asked for a gesture, 0 to 5, and of what kind; a person reads the emoji, the record keeps the reading. */
+export interface Gesture { score: number; intent: GestureIntent }
 /** Outcome of one eval, recorded on the thread. */
 export interface Decision {
   id: string
@@ -204,6 +209,8 @@ export interface Decision {
   mandate?: Mandate
   /** Assessor-supplied audit data (rule assessments, direction, evidence). */
   audit?: Record<string, unknown>
+  /** What a `react` Decision read the message as, which the mark draws. */
+  gesture?: Gesture
   /** A person dismissed the problem an unavailable Decision shows. */
   dismissed?: true
 }

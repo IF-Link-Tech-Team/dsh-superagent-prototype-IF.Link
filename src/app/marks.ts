@@ -1,6 +1,6 @@
 /** Choosing which emoji a message wears, with a decision model that reads the message and the work around it. */
 import { z } from 'zod'
-import type { OutboundMessage, Trigger } from '../core/index.ts'
+import type { GestureIntent, OutboundMessage, Trigger } from '../core/index.ts'
 import { FEISHU_EMOJIS, isFeishuEmoji } from '../feishu-emojis.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { threadKey } from '../core/index.ts'
@@ -31,6 +31,21 @@ const INSTRUCTIONS = [
   '优先挑有性格的（Fire 来劲、Coffee 长活、SALUTE 保证完成、FACEPLAM 无奈、SWEAT 有压力、LOL 好笑……），',
   '不要总是挑最保守的那一个；只有严肃或紧急的场合才退回 OnIt / OK。不要挑冒犯、暧昧、涉黄涉暴的。',
 ].join('')
+/** The emoji a gesture intent may draw, so a celebration never picks a skull and a condolence never picks a party horn. */
+const POOLS: Record<GestureIntent, readonly string[]> = {
+  celebrate: ['PARTY', 'FIREWORKS', 'Trophy', 'YEAH', 'Fire', 'GIFT', 'CAKE'],
+  applause: ['APPLAUSE', 'CLAP', 'PRAISE', 'HIGHFIVE', 'FISTBUMP', 'MUSCLE'],
+  laugh: ['LOL', 'LAUGH', 'CHUCKLE', 'FACEPALM', 'SMIRK', 'TONGUE'],
+  comfort: ['HUG', 'COMFORT', 'FINGERHEART', 'HEART', 'ROSE'],
+  hype: ['GoGoGo', 'MUSCLE', 'STRIVE', 'YouAreTheBest', 'Fire', 'STRIVE'],
+  respect: ['SALUTE', 'SaluteFace', 'FINGERHEART', 'THUMBSUP', 'HIGHFIVE'],
+  surprise: ['WOW', 'SHOCKED', 'WHAT', 'SPEECHLESS', 'SWEAT'],
+  tease: ['WINK', 'SMIRK', 'TEASE', 'TONGUE', 'ClownFace', 'LOL'],
+  aww: ['LOVE', 'BLUSH', 'INNOCENTSMILE', 'FINGERHEART', 'ROSE'],
+  ouch: ['SWEAT', 'SKULL', 'SPITBLOOD', 'TOASTED', 'FACEPALM', 'ColdSweat'],
+  thanks: ['THANKS', 'ThanksFace', 'ROSE', 'FINGERHEART', 'BLUSH'],
+  agree: ['FISTBUMP', 'JIAYI', 'Yes', 'CheckMark', 'THUMBSUP'],
+}
 /** How much of the message, the ticket and its history the pick reads; longer text is cut, since the pick needs the gist. */
 const TEXT_CHARS = 600, TITLE_CHARS = 120, SCOPE_CHARS = 300, HISTORY = 5, HISTORY_CHARS = 120
 /**
@@ -53,7 +68,7 @@ export class MarkPicker implements MarkChooser {
     const trigger = this.trigger(message)
     if (!trigger) return undefined
     const model = this.options.model ?? 'clef-flash'
-    const body = { model, state: this.state(trigger, message), questions: this.questions() }
+    const body = { model, state: this.state(trigger, message), questions: this.questions(message.intent) }
     try {
       const response = await (this.options.fetch ?? globalThis.fetch)(this.url(model), {
         method: 'POST', headers: { Authorization: `Bearer ${this.options.token}`, 'Content-Type': 'application/json' },
@@ -94,18 +109,25 @@ export class MarkPicker implements MarkChooser {
     }
   }
   /** The two questions: the tone the model reads, and the emoji it picks from every one Feishu has. */
-  private questions(): Record<string, unknown> {
+  private questions(intent?: GestureIntent): Record<string, unknown> {
     return {
       tone: { type: 'choice', instructions: '这条消息属于哪种语气？',
         criteria: { brisk: '普通请求，干净利落地开工', playful: '语气轻松、有玩笑', serious: '涉及钱、承诺、人事、事故',
           urgent: '催得急、今天就要', empathy: '对方在担心、抱怨、有情绪', thanks: '道谢、收尾' } },
-      emoji: { type: 'choice', instructions: INSTRUCTIONS,
-        criteria: Object.fromEntries(Object.entries(FEISHU_EMOJIS).map(([id, emoji]) => [id, emoji.zh])) },
+      emoji: { type: 'choice', instructions: instructionsFor(intent),
+        criteria: Object.fromEntries(candidateIds(intent).map(id => [id, FEISHU_EMOJIS[id]!.zh])) },
     }
   }
   private url(model: string): string {
     return `https://api.cloudflare.com/client/v4/accounts/${this.options.account}/ai/run/@cf/cloudflare/${model}`
   }
 }
+/** The emoji a gesture intent may draw; a mark with no intent is picked from everything Feishu has. */
+const candidateIds = (intent?: GestureIntent): readonly string[] =>
+  intent && POOLS[intent] ? POOLS[intent].filter(id => isFeishuEmoji(id)) : Object.keys(FEISHU_EMOJIS)
+/** What the pick is asked for: a working mark, or the gesture the Router read. */
+const instructionsFor = (intent?: GestureIntent): string => intent
+  ? `这条消息不需要我们干活，但值得给一个反应。挑一个${intent}味最足的飞书表情贴上去，要像一个真同事顺手点的：贴切、可以俏皮，别冒犯。`
+  : INSTRUCTIONS
 /** Cuts text to `chars`, marking where it was cut, so one long message cannot crowd the pick's short question. */
 const cut = (text: string, chars: number): string => text.length <= chars ? text : `${text.slice(0, chars)}…`

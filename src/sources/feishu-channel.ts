@@ -11,6 +11,8 @@ import { feishuTriggerId } from './feishu-trigger.ts'
 /** The emoji a message wears while its ticket works on it, and the one it wears once that work is done. */
 const TAKEN_UP = 'OnIt'
 const FINISHED = 'DONE'
+/** The emoji a social reaction falls back to when nothing picked one. */
+const GESTURE = 'THUMBSUP'
 /** Feishu or Lark AppLink that opens a chat; used when the message's own link was not delivered with the event. */
 export const feishuChatLink = (brand: 'feishu' | 'lark', chatId: string): string =>
   `https://applink.${brand === 'lark' ? 'larksuite.com' : 'feishu.cn'}/client/chat/open?openChatId=${encodeURIComponent(chatId)}`
@@ -80,7 +82,8 @@ export async function reactFeishu(host: Pick<SourceContext, 'commands'>, message
     } else if (message.reaction === 'reopened') {
       await clearMarks(host, messageId, [FINISHED])
       await addMark(host, messageId, TAKEN_UP)
-    } else await clearMarks(host, messageId, [TAKEN_UP, FINISHED])
+    } else if (message.reaction === 'gesture') await addMark(host, messageId, message.emoji && isFeishuEmoji(message.emoji) ? message.emoji : GESTURE)
+    else await clearMarks(host, messageId, [TAKEN_UP, FINISHED])
   } catch (error) {
     if (gone(error)) return 'gone'
     throw error

@@ -45,7 +45,7 @@ const fromDecision = (decision: Decision) => ({ decision: decision.kind, reason:
  * runs (`FIELDS`), so an item that lacks one, or whose value breaks a limit, is refused alone.
  */
 const RouteItemSchema = z.object({
-  kind: z.enum(['accept', 'attach', 'ignore', 'stop']),
+  kind: z.enum(['accept', 'attach', 'ignore', 'stop', 'react']),
   trigger_id: z.string().describe('The candidate card\'s trigger_id; deciding it decides its batch.'),
   ticket_id: z.string().nullish().describe('attach and stop: the ticket.'),
   title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
@@ -53,6 +53,9 @@ const RouteItemSchema = z.object({
   acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
+  gesture_score: z.number().int().min(0).max(5).nullish().describe('react: 0-5, how much it asks for a gesture.'),
+  gesture_intent: z.enum(['celebrate', 'applause', 'laugh', 'comfort', 'hype', 'respect', 'surprise', 'tease', 'aww', 'ouch', 'thanks', 'agree'])
+    .nullish().describe('react: what the gesture says; agree only when you checked the claim and truly agree.'),
 }).strict()
 type RouteItem = z.infer<typeof RouteItemSchema>
 type Kind = RouteItem['kind']
@@ -65,13 +68,17 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
+  gesture_score: { check: z.number().int().min(0).max(5), reads: ['react'], needs: ['react'] },
+  gesture_intent: { check: z.enum(['celebrate', 'applause', 'laugh', 'comfort', 'hype', 'respect', 'surprise', 'tease', 'aww', 'ouch', 'thanks', 'agree']),
+    reads: ['react'], needs: ['react'] },
 }
 /** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
 function invalid(item: RouteItem): string | undefined {
   for (const [field, { check, reads, needs }] of Object.entries(FIELDS) as [Field, typeof FIELDS[Field]][]) {
     const value = item[field]
     if (!reads.includes(item.kind)) continue
-    if (value === undefined || value === null || value.trim() === '') {
+    const blank = typeof value === 'number' ? false : value === undefined || value === null || value.trim() === ''
+    if (blank) {
       if (needs.includes(item.kind)) return `${item.kind} needs ${field}`
       continue
     }
@@ -101,6 +108,11 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
       if (decision.id === before) {
         return { decision: 'accept', reason: `Already accepted as ${decision.ticketId}; title and acknowledgement unchanged`, ticketId: decision.ticketId }
       }
+      return { ...fromDecision(decision), triggerIds: decision.triggerIds }
+    }
+    case 'react': {
+      const decision = host.engine.decide(item.trigger_id, { kind: 'react', reason: 'Social gesture',
+        gesture: { score: item.gesture_score!, intent: item.gesture_intent! } })
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
     case 'attach': {

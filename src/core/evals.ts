@@ -2,16 +2,17 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { liveTicket, threadKey } from './model.ts'
-import type { Decision, DecisionKind, Evaluation, Mandate, MandateBasis, Strength, Thread, Trigger } from './model.ts'
+import type { Decision, DecisionKind, Evaluation, Gesture, Mandate, MandateBasis, Strength, Thread, Trigger } from './model.ts'
 import type { AssessmentOutcome, Candidate, Policy } from './ports.ts'
 import { said, type Reason } from './reasons.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Tickets } from './tickets.ts'
+import type { Replies } from './replies.ts'
 
 /** An outcome for the Eval that holds a Trigger; `evalId` names the Eval it was judged for, so a later Eval refuses it. */
 export type Outcome = AssessmentOutcome & { evalId?: string }
 /** What an Eval ends with, as its Decision records it. */
-interface Finished { kind: DecisionKind; reason: Reason[]; audit?: Record<string, unknown>; ticketId?: string; mandate?: Mandate }
+interface Finished { kind: DecisionKind; reason: Reason[]; audit?: Record<string, unknown>; ticketId?: string; mandate?: Mandate; gesture?: Gesture }
 /** An outcome's reason: a code it carries, else the words its assessor or person wrote. */
 const reasonOf = (reason: string | Reason): Reason[] => [typeof reason === 'string' ? said(reason) : reason]
 const stronger = (a: Strength, b: Strength): Strength => a === 'explicit' || b === 'explicit' ? 'explicit' : 'inferred'
@@ -25,7 +26,7 @@ const REQUEUES = 2
  * Engine routes the main Session's decisions, people's replays, worker handbacks, and the pass's Eval work here.
  */
 export class Evals extends EnginePart {
-  constructor(options: EngineOptions, private readonly tickets: Tickets) { super(options) }
+  constructor(options: EngineOptions, private readonly tickets: Tickets, private readonly replies: Replies) { super(options) }
 
   /**
    * Expire a Thread's Eval past its deadline (see `expire`), unless processing is paused: then the Eval notes when the
@@ -288,6 +289,7 @@ export class Evals extends EnginePart {
     }
     // An inferred candidate ignored without an assessment, from its card, says so beside the reason given.
     const unassessed = outcome.kind === 'ignore' && evaluation.strength !== 'explicit' && !outcome.audit ? [{ code: 'ignoredFromCard' }] : []
+    if (outcome.kind === 'react') return this.gesture(thread, evaluation, outcome)
     if (outcome.kind === 'ignore' || outcome.kind === 'unavailable') return this.finish(thread, evaluation, { kind: outcome.kind,
       reason: [...unassessed, ...reasonOf(outcome.reason)], ...audit })
     if (outcome.kind === 'stop') {
@@ -301,6 +303,22 @@ export class Evals extends EnginePart {
       return decision
     }
     return this.accept(thread, evaluation, outcome)
+  }
+  /**
+   * Record a react: the Eval read a message that asks for no work but does ask for a gesture. The Decision keeps the reading,
+   * and a mark is drawn when the deployment's budget allows one; a refusal records why, so the panel shows the gesture the
+   * chat did not get.
+   */
+  private gesture(thread: Thread, evaluation: Evaluation, outcome: Extract<AssessmentOutcome, { kind: 'react' }>): Decision {
+    const trigger = this.repo.triggers.get(evaluation.triggerIds[0]!)
+    const admit = !!trigger && (this.options.gestures?.admit(trigger, outcome.gesture) ?? true)
+    const audit = outcome.audit ? { audit: outcome.audit } : {}
+    // A chat that has had its share records the gesture it did not get, so the refusal reads on the panel instead of vanishing.
+    if (!trigger || !admit) return this.finish(thread, evaluation, { kind: 'ignore',
+      reason: [{ code: 'gestureBudget', values: { intent: outcome.gesture.intent, score: String(outcome.gesture.score) } }], ...audit })
+    const decision = this.finish(thread, evaluation, { kind: 'react', reason: reasonOf(outcome.reason), gesture: outcome.gesture, ...audit })
+    this.replies.gesture(trigger, outcome.gesture)
+    return decision
   }
   /** Record an accept with the Mandate the Eval gives, and have Tickets create its ticket. */
   private accept(thread: Thread, evaluation: Evaluation, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Decision {
@@ -328,7 +346,8 @@ export class Evals extends EnginePart {
     const at = this.now()
     const decision: Decision = { id: key('decision', evaluation.id), evalId: evaluation.id, threadKey: thread.key, triggerIds: evaluation.triggerIds,
       policyVersion: evaluation.policyVersion, at, kind: outcome.kind, reason: outcome.reason, strength: evaluation.strength,
-      ...(outcome.ticketId ? { ticketId: outcome.ticketId } : {}), ...(outcome.mandate ? { mandate: outcome.mandate } : {}), ...(outcome.audit ? { audit: outcome.audit } : {}) }
+      ...(outcome.ticketId ? { ticketId: outcome.ticketId } : {}), ...(outcome.mandate ? { mandate: outcome.mandate } : {}),
+      ...(outcome.audit ? { audit: outcome.audit } : {}), ...(outcome.gesture ? { gesture: outcome.gesture } : {}) }
     this.repo.decisions.save(decision)
     for (const id of evaluation.triggerIds) {
       const disposition = this.repo.triggers.disposition(id) ?? { fanout: [], at }

@@ -33,7 +33,7 @@ export class Engine {
     this.replies = new Replies(options)
     this.tickets = new Tickets(options, this.replies)
     this.assignments = new Assignments(options, this.tickets, this.replies)
-    this.evals = new Evals(options, this.tickets)
+    this.evals = new Evals(options, this.tickets, this.replies)
     this.intake = new Intake(options, this.tickets)
   }
 

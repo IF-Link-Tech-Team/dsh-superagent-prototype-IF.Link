@@ -29,6 +29,10 @@ export const AssessmentSchema = z.object({
   scope: z.string().max(1500),
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),
+  /** What a message that asks for no work reads as: how much it asks for a gesture (0-5) and of what kind. */
+  gesture: z.object({ score: z.number().int().min(0).max(5),
+    intent: z.enum(['celebrate', 'applause', 'laugh', 'comfort', 'hype', 'respect', 'surprise', 'tease', 'aww', 'ouch', 'thanks', 'agree']) })
+    .nullish().describe('Set only when the message asks for no work but does ask for a reaction; the mode decides whether it is drawn.'),
   reason: z.string().min(1).max(500),
 }).strict().refine(value => value.decision !== 'accept' || !directionAllowed(value.direction) || !value.rule_assessments.some(rule => rule.matched)
   || !!value.worktree_name, { message: 'Accepted work requires a short English worktree_name', path: ['worktree_name'] })

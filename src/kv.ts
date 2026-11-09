@@ -52,6 +52,9 @@ export const KV = {
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.
    */
+  /** Social reactions: each chat's rolling pace, and when a person last got one, so a chat is not flooded by gestures. */
+  gestures: { pace: family<{ at: string; count: number }, [chat: string]>('gesture-pace:'),
+    person: family<string, [person: string]>('gesture-person:') },
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },

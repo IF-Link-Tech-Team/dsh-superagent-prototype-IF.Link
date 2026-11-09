@@ -11,8 +11,9 @@ function trigger(id: string, overrides: Partial<Trigger> = {}): Trigger {
 interface Hooks {
   emit?: (event: { type: string; data: Record<string, unknown> }) => void
   prepareTicket?: EngineOptions['prepareTicket']
+  gestures?: EngineOptions['gestures']
 }
-function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }: Hooks = {}) {
+function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket, gestures }: Hooks = {}) {
   const repo = new MemoryRepositories()
   const outbox: OutboundMessage[] = []
   const withdrawn: string[] = []
@@ -43,7 +44,8 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
     withdraw: id => { withdrawn.push(id) },
   }
   const engine = new Engine({ repo, scope, policy: () => policy, assessor, executor, outbox: queued,
-    ...emit ? { emit } : {}, ...prepareTicket ? { prepareTicket } : {}, now: () => new Date(Date.UTC(2026, 8, 23, 0, 0, clock)).toISOString() })
+    ...emit ? { emit } : {}, ...prepareTicket ? { prepareTicket } : {}, ...gestures ? { gestures } : {},
+    now: () => new Date(Date.UTC(2026, 8, 23, 0, 0, clock)).toISOString() })
   /** Simulate the executor starting queued assignments (unless `launch` is false) and delivering pending ticket inputs. */
   function settle({ launch = true } = {}) {
     for (;;) {
@@ -1622,6 +1624,26 @@ describe('ignores from the card', () => {
     // Accepting an inferred candidate still takes an assessment's matched rules.
     h.engine.receive(trigger('5', { actor: guest })); h.engine.reevaluate('5'); h.pump()
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
+  })
+})
+
+describe('social reactions', () => {
+  it('records a reaction with its reading and queues one mark, without a ticket', () => {
+    const h = harness()
+    h.engine.receive(trigger('1')); h.pump()
+    const decision = h.engine.decide('1', { kind: 'react', reason: 'Finished work, worth a cheer.',
+      gesture: { score: 5, intent: 'applause' } })
+    expect(decision).toMatchObject({ kind: 'react', gesture: { score: 5, intent: 'applause' } })
+    expect(decision).not.toHaveProperty('ticketId')
+    expect(h.repo.tickets.list()).toEqual([])
+    expect(h.outbox.filter(item => item.kind === 'reaction')).toEqual([expect.objectContaining({ reaction: 'gesture', intent: 'applause' })])
+  })
+  it('records the gesture a chat did not get when its budget refuses one', () => {
+    const h = harness({}, { gestures: { admit: () => false } })
+    h.engine.receive(trigger('2')); h.pump()
+    const decision = h.engine.decide('2', { kind: 'react', reason: 'Funny.', gesture: { score: 4, intent: 'laugh' } })
+    expect(decision).toMatchObject({ kind: 'ignore', reason: [expect.objectContaining({ code: 'gestureBudget' })] })
+    expect(h.outbox).toEqual([])
   })
 })
 

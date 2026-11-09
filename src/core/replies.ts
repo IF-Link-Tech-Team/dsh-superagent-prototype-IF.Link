@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, ticketOutcome } from './model.ts'
-import type { ChannelRef, Strength, Ticket, Trigger } from './model.ts'
+import type { ChannelRef, Gesture, Strength, Ticket, Trigger } from './model.ts'
 import type { ReplyStatus } from './ports.ts'
 import { EnginePart } from './part.ts'
 
@@ -86,6 +86,15 @@ export class Replies extends EnginePart {
       const trigger = this.repo.triggers.get(id)
       return trigger?.channel && this.options.outbox.status(key('react', id)) === 'sent' ? [trigger as Trigger & { channel: NonNullable<Trigger['channel']> }] : []
     })
+  }
+  /**
+   * Queue a social reaction on a message that asked for no work: no Ticket, no text, one emoji that a Channel may draw and a
+   * picker may choose. It is queued once per Trigger, so a replayed decision cannot react twice to the same message.
+   */
+  gesture(trigger: Trigger, gesture: Gesture): void {
+    if (!trigger.channel) return
+    this.options.outbox.send({ id: key('gesture', trigger.id), channel: trigger.channel, text: '', kind: 'reaction', triggerId: trigger.id,
+      reaction: 'gesture', intent: gesture.intent })
   }
   /** Withdraw a ticket's question for a person from the outbox, unless it went out already. */
   withdrawAttention(attentionId: string): void { this.options.outbox.withdraw(key('attention-reply', attentionId)) }

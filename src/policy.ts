@@ -5,7 +5,7 @@
 import { LIMITS } from './limits.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
-import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
+import { key, type AssessmentOutcome, type Gesture, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
   type Trigger, type ActorRef, type GateResult } from './core/index.ts'
 import { sameName } from './infra/text.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
@@ -29,6 +29,8 @@ export function directionAllowed(value: unknown): value is AdmissionDirection {
 }
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
+  /** Present when the message asks for no work but does ask for a gesture, which the mode decides to draw or only record. */
+  gesture?: { score: number; intent: Gesture['intent'] } | null | undefined
   title: string; scope: string; reason: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
 }
 /**
@@ -47,6 +49,16 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   const matches = judged.filter(item => item.matched).map(({ rule_id, reason }) => ({ rule_id, reason }))
   const evidence = assessment.intent_evidence ? { intent_evidence: assessment.intent_evidence } : {}
   const audit = { matches, rule_assessments: judged, direction: assessment.direction, ...evidence }
+  // A message that needs no work may still ask for a gesture: the mode decides whether it is drawn or only recorded.
+  if (assessment.gesture) {
+    const { score, intent } = assessment.gesture
+    const gesture = { score, intent }
+    const mode = settings.policy.gestures.mode
+    if (mode === 'off') return { kind: 'ignore', reason: { code: 'gestureOff' }, audit }
+    if (mode === 'observe' || score < 3) return { kind: 'ignore', reason: { code: 'gestureObserved',
+      values: { intent, score: String(score) } }, audit: { ...audit, gesture } }
+    return { kind: 'react', gesture, reason: assessment.reason, audit: { ...audit, gesture } }
+  }
   if (assessment.decision !== 'accept') return { kind: assessment.decision, reason: assessment.reason, audit }
   if (!directionAllowed(assessment.direction)) return { kind: 'ignore', audit, reason: { code: 'directionUnsettled' } }
   if (!matches.length) return { kind: 'ignore', audit, reason: { code: 'noRuleMatched' } }
@@ -59,13 +71,15 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   return { kind: 'accept', title, scope, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
     rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
 }
-const DEFAULT_RULES = [
-  { id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Explicit requests to correct a typo, wording, punctuation or existing translation. Preserve product promises and business meaning.' },
-  { id: 'visual', name: 'Visual fixes', enabled: true, instruction: 'Explicit implementation requests for local spacing, alignment, overflow or styling, with a specified target or an objectively established existing standard/correct state to restore. Locating an element or calling it inconsistent, unattractive or hard to understand does not establish a target. Do not invent visual style, information hierarchy, rendering or interaction decisions. No redesign, new interaction or behavior. A known spacing defect does not authorize adjacent undefined restyling; assess only a clearly separable authorized scope. If direction or scope is unsettled, observe only: no acknowledgement, worker or unsolicited question.' },
+const DEFAULT_RULES: Rule[] = [
+  { id: 'copy', kind: 'work' as const, name: 'Copy fixes', enabled: true, instruction: 'Explicit requests to correct a typo, wording, punctuation or existing translation. Preserve product promises and business meaning.' },
+  { id: 'visual', kind: 'work' as const, name: 'Visual fixes', enabled: true, instruction: 'Explicit implementation requests for local spacing, alignment, overflow or styling, with a specified target or an objectively established existing standard/correct state to restore. Locating an element or calling it inconsistent, unattractive or hard to understand does not establish a target. Do not invent visual style, information hierarchy, rendering or interaction decisions. No redesign, new interaction or behavior. A known spacing defect does not authorize adjacent undefined restyling; assess only a clearly separable authorized scope. If direction or scope is unsettled, observe only: no acknowledgement, worker or unsolicited question.' },
 ]
 /** An assessment rule; its instruction may also specify PR reviewers and whether to wait for their approval. */
 export const RuleSchema = z.object({ id: RuleIdSchema, name: z.string().trim().min(1).max(LIMITS.ruleName), enabled: z.boolean(),
-  instruction: z.string().trim().min(1).max(LIMITS.ruleInstruction) }).strict()
+  instruction: z.string().trim().min(1).max(LIMITS.ruleInstruction),
+  /** A `gesture` rule asks for an emoji instead of a Ticket; a `work` rule asks for work. */
+  kind: z.enum(['work', 'gesture']).default('work') }).strict()
 export type Rule = z.infer<typeof RuleSchema>
 export const RoleModelSchema = z.object({ provider: z.string().trim().min(1), model: z.string().trim().min(1), reasoningEffort: z.string().trim().min(1).optional() }).strict()
 export type RoleModel = z.infer<typeof RoleModelSchema>
@@ -86,6 +100,8 @@ export const SourcePolicySchema = z.object({ allowed: z.array(AllowedSchema).def
 export type SourcePolicy = z.infer<typeof SourcePolicySchema>
 export const PolicyConfigSchema = z.object({
   rules: z.array(RuleSchema).refine(rules => new Set(rules.map(rule => rule.id)).size === rules.length, 'Duplicate rule IDs').default(DEFAULT_RULES),
+  /** Whether a message that needs no work may still get a social reaction, and when that is only recorded. */
+  gestures: z.object({ mode: z.enum(['off', 'observe', 'auto']).default('observe') }).strict().default({ mode: 'observe' }),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourcePolicySchema).default({}),
 }).strict()
 export const EvalConfigSchema = z.object({
@@ -126,7 +142,11 @@ export const POLICY_REVISION = 'mandate-v3'
  * Changes to models, concurrency, pause state, or polling intervals do not invalidate existing decisions.
  */
 export function policyVersion(settings: Settings): string {
-  return key(POLICY_REVISION, JSON.stringify({ rules: settings.policy.rules, mode: settings.eval.mode, sources: settings.policy.sources }))
+  // A rule's `kind` joins the version only when it asks for a gesture: every work rule predates the field, and hashing it
+  // would change every stored Policy version for no behaviour.
+  const rules = settings.policy.rules.map(rule => rule.kind === 'work'
+    ? { id: rule.id, name: rule.name, enabled: rule.enabled, instruction: rule.instruction } : rule)
+  return key(POLICY_REVISION, JSON.stringify({ rules, mode: settings.eval.mode, sources: settings.policy.sources }))
 }
 export function allowedSender(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {
   return settings.policy.sources[actor.source]?.allowed.find(entry => sameName(entry.id, actor.id))

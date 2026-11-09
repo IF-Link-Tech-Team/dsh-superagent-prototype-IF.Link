@@ -1,5 +1,5 @@
 /** Ports the core depends on. Sources, policies, assessors, executors, and channels are project-specific. */
-import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
+import type { Assignment, ChannelRef, Decision, DecisionKind, Gesture, GestureIntent, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
   from './model.ts'
 import type { Reason } from './reasons.ts'
 
@@ -44,6 +44,8 @@ export type AssessmentOutcome =
   | { kind: 'accept'; title: string; scope: string; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;
     name?: string; note?: string }
   | { kind: 'stop'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
+  /** A message that needs no work but asks for a gesture: the Eval records it and a mark is drawn, without a Ticket. */
+  | { kind: 'react'; gesture: Gesture; reason: string | Reason; audit?: Record<string, unknown> }
 
 /** Semantic judgement. `request` queues the assessment, idempotently per `evalId`; the outcome returns through `Engine.decide`. */
 export interface Assessor {
@@ -73,7 +75,7 @@ export interface Executor {
  * says the work it asked for is done, `reopened` takes that back while a follow-up resumes the work, and `withdrawn` takes
  * the mark away because the work ended otherwise.
  */
-export type ReactionKind = 'received' | 'finished' | 'reopened' | 'withdrawn'
+export type ReactionKind = 'received' | 'finished' | 'reopened' | 'withdrawn' | 'gesture'
 /**
  * A message for a Channel; `ticketId` names the Ticket it is for, when there is one. A `reaction` carries no text: the
  * Source decides how its own channel draws a mark, such as a Feishu emoji reaction.
@@ -90,6 +92,8 @@ export interface OutboundMessage {
   triggerId?: string
   /** The emoji a mark draws, when something chose one; a Channel without one draws its own. */
   emoji?: string
+  /** What a `gesture` says, so the pick reads it as the tone the Router did. */
+  intent?: GestureIntent
 }
 /** A queued message waits (`pending`), went out (`sent`), or was dropped because its conversation can never receive it (`dropped`). */
 export type ReplyStatus = 'pending' | 'sent' | 'dropped'

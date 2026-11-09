@@ -36,6 +36,7 @@ import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { MarkPicker } from './marks.ts'
+import { Gestures } from './gestures.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
@@ -146,7 +147,7 @@ export class Runtime extends Service implements SourceHost {
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, marks, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources, { degraded: this.router.degraded() })
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
+      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, gestures: new Gestures(store),
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))

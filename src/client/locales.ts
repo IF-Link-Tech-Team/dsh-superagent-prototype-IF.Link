@@ -24,6 +24,7 @@ const TEXT = {
   'decision.stop': ['停止', 'Stop'],
   'decision.ignore': ['忽略', 'Ignore'],
   'decision.unavailable': ['未完成', 'Unavailable'],
+  'decision.react': ['表情回应', 'Reacted'],
   'strength.explicit': ['明确', 'Explicit'],
   'strength.inferred': ['推断', 'Inferred'],
   'mode.off': ['关闭', 'Off'],
@@ -612,6 +613,9 @@ const TEXT = {
   'reason.legacyImport': ['从旧版工单记录导入', 'Imported from a legacy Ticket record'],
   'reason.channelGone': ['对话已无法接收消息', 'The conversation can no longer receive messages'],
   'reason.channelIgnored': ['来源已不再监听这个对话', 'The Source no longer listens to this conversation'],
+  'reason.gestureObserved': ['观察模式：本来会给一个表情（{intent}，{score} 分）', 'Observe mode: would react ({intent}, score {score})'],
+  'reason.gestureBudget': ['这个群这阵子的表情额度用完了，这条只记录', 'This chat has had its gestures for now; this one is recorded only'],
+  'reason.gestureOff': ['社交表情已关', 'Social reactions are off'],
   'reason.failed': ['回执没能贴上', 'The mark could not be added'],
   'reason.hostRestarted': ['dsh-superagent 重启', 'dsh-superagent restarted'],
   'reason.retried': ['人工重试', 'Retried by a person'],
@@ -776,7 +780,7 @@ export const GLOSSARY = {
   execution: ['executor', 'environment', 'ticket', 'assignment', 'input', 'report', 'attention'],
 } as const
 export const GLOSSARY_VALUES = {
-  decision: ['decision.accept', 'decision.reopen', 'decision.stop', 'decision.ignore', 'decision.unavailable'], strength: ['strength.explicit', 'strength.inferred'],
+  decision: ['decision.accept', 'decision.reopen', 'decision.stop', 'decision.ignore', 'decision.unavailable', 'decision.react'], strength: ['strength.explicit', 'strength.inferred'],
   ticket: ['stage.answer', 'stage.review', 'stage.blocked', 'stage.failed', 'stage.delivery', 'stage.queued', 'stage.working', 'stage.idle', 'ticket.ended'],
   assignment: ['assignment.pending', 'assignment.running', 'assignment.ended'], report: ['report.progress', 'report.waiting', 'report.ready', 'report.blocked', 'report.failed', 'report.dropped'],
 } as const

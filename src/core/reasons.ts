@@ -23,6 +23,9 @@ export const REASONS = {
   noRuleMatched: 'No enabled admission rule matched',
   ignoredFromCard: 'Ignored from its card, without a rule assessment',
   observed: 'Observe mode: would accept ({text})',
+  gestureObserved: 'Observe mode: would react ({intent}, score {score})',
+  gestureBudget: 'This chat already had its gestures for now; this one is recorded only',
+  gestureOff: 'Social reactions are off',
 } as const
 export type ReasonCode = keyof typeof REASONS
 /** Reason code and template values; `triggerId` identifies the trigger in a batch that the reason applies to. */

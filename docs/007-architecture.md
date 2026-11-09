@@ -299,6 +299,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
 | `src/feishu-emojis.ts` | Every emoji `im.reactions.create` accepts, with the Chinese each reads as and whether a working message may wear it |
 | `src/app/marks.ts` | `MarkPicker`: the decision model behind the emoji a took-up mark draws, and the fallback to the Channel's own |
+| `src/app/gestures.ts` | `Gestures`: a chat's pace of social reactions, refusing one to the same person within half an hour or above two an hour |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |

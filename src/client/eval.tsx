@@ -152,7 +152,7 @@ function PolicyBlock() {
   const reveal = (target: EventTarget) => { if (target instanceof Element
     && target.closest('.dt-rules')) setExpanded(new Set(policy.rules.map(rule => rule.id))) }
   const part = (id: string) => (policy.sources[id] ?? { allowed: [] }) as Part
-  const add = () => insert({ id: crypto.randomUUID(), name: '', enabled: true, instruction: '' }, policy.rules.length)
+  const add = () => insert({ id: crypto.randomUUID(), name: '', enabled: true, kind: 'work' as const, instruction: '' }, policy.rules.length)
   return <form className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }}
     onInvalidCapture={event => reveal(event.target)}>
     <Fields disabled={draft.busy}>

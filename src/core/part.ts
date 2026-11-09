@@ -1,9 +1,11 @@
 /** Shared base class and configuration for Engine domain parts. */
 import { UserError } from './errors.ts'
 import { followupOwners, reached, threadKey } from './model.ts'
-import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
+import type { Gesture, Thread, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
 
+/** Decides whether a social reaction may be drawn now; a refusal records why in the Decision instead of drawing one. */
+export interface GestureBudget { admit(trigger: Trigger, gesture: Gesture): boolean }
 export interface EngineOptions {
   repo: Repositories
   policy: () => Policy
@@ -13,6 +15,8 @@ export interface EngineOptions {
   executor: Executor
   outbox: Outbox
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
+  /** Whether a social reaction may be drawn now; a deployment keeps each chat's pace and refuses above it. */
+  gestures?: GestureBudget
   now?: () => string
   emit?: (event: DomainEvent) => void
 }
