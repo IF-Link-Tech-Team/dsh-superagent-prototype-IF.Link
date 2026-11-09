@@ -1,6 +1,7 @@
 /** Feishu outbound channel: posts threaded bot replies, marks messages with emoji reactions, and constructs chat deep links. */
 import { z } from 'zod'
 import type { OutboundMessage } from '../core/index.ts'
+import { isFeishuEmoji } from '../feishu-emojis.ts'
 import { CliError } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
@@ -72,7 +73,7 @@ export async function reactFeishu(host: Pick<SourceContext, 'commands'>, message
   const messageId = message.channel.address.messageId
   if (!messageId) throw new Error('Missing Feishu mark target')
   try {
-    if (message.reaction === 'received') await addMark(host, messageId, TAKEN_UP)
+    if (message.reaction === 'received') await addMark(host, messageId, message.emoji && isFeishuEmoji(message.emoji) ? message.emoji : TAKEN_UP)
     else if (message.reaction === 'finished') {
       await clearMarks(host, messageId, [TAKEN_UP])
       await addMark(host, messageId, FINISHED)

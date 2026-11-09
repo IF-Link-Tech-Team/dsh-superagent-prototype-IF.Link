@@ -88,6 +88,8 @@ export interface OutboundMessage {
   reaction?: ReactionKind
   /** The Trigger whose message a mark is on, so the Channel can mark the message the Ticket took up. */
   triggerId?: string
+  /** The emoji a mark draws, when something chose one; a Channel without one draws its own. */
+  emoji?: string
 }
 /** A queued message waits (`pending`), went out (`sent`), or was dropped because its conversation can never receive it (`dropped`). */
 export type ReplyStatus = 'pending' | 'sent' | 'dropped'

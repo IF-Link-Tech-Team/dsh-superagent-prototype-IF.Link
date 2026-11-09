@@ -38,7 +38,8 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 | --- | --- | --- |
 | Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
-| Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
+| Marks | `src/app/marks.ts` | `MarkPicker`: the decision model that picks the emoji a took-up mark draws, from the message, the Router's judgement and the Ticket; a missing account or a failed pick leaves the Channel its own mark |
+| `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to, and a mark its Channel failed to draw is dropped after one attempt |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
 
 ### Engine
@@ -65,7 +66,7 @@ Callers receive only their role's `Pick` of the Engine: `EngineForSources`, `Eng
 
 | Role | Method | Effect |
 | --- | --- | --- |
-| Sources | `receive(trigger)` | Stores a Trigger once and answers `stored`, `duplicate`, or `filtered` when no Source receives it; fans it out to the Tickets subscribed to its Threads, where a person's message resumes an ended Ticket at once unless processing is paused, and queues it for Eval on its primary Thread, unless it is a person's message that reached a Ticket, which stays that Ticket's |
+| Sources | `receive(trigger)` | Stores a Trigger once and answers `stored`, `duplicate`, or `filtered` when no Source receives it; fans it out to the Tickets subscribed to its Threads, where a person's message marks itself and resumes an ended Ticket at once unless processing is paused, and queues it for Eval on its primary Thread, unless it is a person's message that reached a Ticket, which stays that Ticket's |
 | Sources | `bindThread(ticketId, thread, own)` | Makes an open Ticket follow one of the Source's Threads, such as a pull request's, `own` when the Ticket opened it; a closed Thread bound again is open again. The Threads' closes, not a `ready` Report, end the Ticket |
 | Sources | `threadClosed(thread, outcome, at)` | A Thread closed: each open Ticket that follows it records the close, and ends once it is done with the Threads it follows (`followsDone`): no Thread it opened is open, or, when it opened none, every Thread it follows closed. It ends `merged` or `closed` as the latest of those closes did, unless work resumed after the close has not reported `ready`, or its Executor took up, by acknowledging or answering it, a person's follow-up it decides after its latest Report other than `progress`, or the end of its last turn; a `dropped` Report then ends it as the close did |
 | Main Session | `candidate(triggerId)` | The Eval that holds a Trigger, as its assessor sees it |
@@ -176,7 +177,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
-| `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
+| `reply` | Outbox | Sends a message or a mark for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it, and a mark that fails is dropped at once rather than retried | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
 
@@ -296,6 +297,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
 | `src/admission.ts` | The admission table's values, each cell's options and defaults, shared with the panel |
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
+| `src/feishu-emojis.ts` | Every emoji `im.reactions.create` accepts, with the Chinese each reads as and whether a working message may wear it |
+| `src/app/marks.ts` | `MarkPicker`: the decision model behind the emoji a took-up mark draws, and the fallback to the Channel's own |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
@@ -333,6 +336,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
+| `src/app/model-router.ts` | `ModelRouter`: each role's fallback chain, a cooldown per failed route, the main Session's recovery probe, and the route states the panel shows |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
@@ -409,6 +413,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
+| `tests/mark-picker.spec.ts` | The emoji a took-up message wears: the request it builds over every emoji Feishu has, the answer it draws, and the Channel's own mark when the account, the call or the answer fails |
+| `tests/feishu-reaction.spec.ts` | The mark a Feishu Channel puts on a message: the taken-up emoji, the finished one that replaces it, a person's equal reaction left alone, and a recalled message that takes none |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
@@ -428,7 +434,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/memory.spec.ts` | The team memory files: the list the main Session reads, one file whole or paged, the refusal of a traversal, and the copy each ticket gets |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
-| `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
+| `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, the refusal of an unknown or repeated fallback route, and the refusals of the pause, a sync and a block |
+| `tests/model-router.spec.ts` | Route failover: the cooldown, walking a chain, the hop guard, Executor Sessions a person pointed elsewhere, the main Session's probe, and the degraded state |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
 | `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |

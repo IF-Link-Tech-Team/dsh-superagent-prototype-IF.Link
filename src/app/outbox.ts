@@ -1,5 +1,6 @@
 /** Reliable outbound message delivery backed by persistent receipts and retried reply effects. */
 import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core/index.ts'
+import type { MarkChooser } from './marks.ts'
 import type { Commands } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -11,6 +12,8 @@ export interface OutboxHost {
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
+  /** Chooses the emoji a took-up mark draws; without one, the Channel draws its own. */
+  readonly marks?: MarkChooser
   paused(): boolean
 }
 
@@ -45,8 +48,13 @@ export class Outbox implements OutboxPort {
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
     try {
+      // A message a person may read: a decision model may pick the emoji its mark draws, and a Channel without a pick draws
+      // its own, so a slow or failed pick never keeps a person waiting for the mark.
+      const drawn = receipt.kind === 'reaction' && receipt.reaction === 'received' && this.host.marks
+        ? await this.host.marks.pick(receipt) : undefined
+      const message = drawn ? { ...receipt, emoji: drawn.emoji } : receipt
       // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
-      const result = await sources.send(receipt, commands)
+      const result = await sources.send(message, commands)
       if (result === 'waiting') throw new Later('The Source is not installed')
       store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
     } catch (error) {

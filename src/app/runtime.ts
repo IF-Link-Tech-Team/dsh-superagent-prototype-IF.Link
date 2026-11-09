@@ -35,6 +35,7 @@ import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
+import { MarkPicker } from './marks.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
@@ -136,7 +137,13 @@ export class Runtime extends Service implements SourceHost {
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
-      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+      // The pick reads the message and the work around it; without an account it stays quiet and a Channel draws its own mark.
+      const marksHealth = board.claim('marks', { state: 'ready', detail: 'No mark picked yet' })
+      const marks = new MarkPicker({ store, health: marksHealth }, { account: process.env.CLOUDFLARE_ACCOUNT_ID ?? '',
+        token: process.env.CLOUDFLARE_WORKERS_AI_API_KEY ?? process.env.CLOUDFLARE_API_KEY ?? '' })
+      if (!marks.configured) marksHealth.set({ state: 'paused', detail: 'CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_WORKERS_AI_API_KEY are unset',
+        at: new Date().toISOString() })
+      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, marks, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources, { degraded: this.router.degraded() })
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
