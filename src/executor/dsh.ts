@@ -14,6 +14,7 @@ import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
+import { isFailoverError, type ModelRouter } from '../app/model-router.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
@@ -83,6 +84,10 @@ export interface ExecutorHost {
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
+  /** The main Session's id: a model failure there has no Ticket, and continues through the router's fallback route. */
+  readonly masterId: string
+  /** The model router, read for when a Session last switched route. */
+  readonly router: Pick<ModelRouter, 'lastSwitchAt' | 'hasRoute'>
   closing(): boolean
   /** Whether processing is paused, which holds launches and input deliveries. */
   paused(): boolean
@@ -236,6 +241,8 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** The route switch of the main Session each resume note already answered, by Session. */
+  private readonly masterNoted = new Map<string, number>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -516,12 +523,27 @@ export class DshExecutor implements Executor {
       }))
     }))
     this.disposers.push(ctx.on('agent/error', ({ agent, error }) => {
+      // The main Session has no Ticket: a model failure there is answered by resuming it on the route the router switched to.
+      if (agent.id === this.host.masterId) { this.masterFailed(agent.id, error); return }
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
       if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
       if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
       void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
     }))
+  }
+  /**
+   * Resume the main Session after a failed model request when the router actually moved it to another route: the failed turn
+   * never entered history, so telling it to continue keeps the pending Eval inside its deadline instead of waiting it out.
+   */
+  private masterFailed(sessionId: string, error: unknown): void {
+    if (this.host.closing() || !isFailoverError(error) || !this.host.router.hasRoute('router')) return
+    const switched = this.host.router.lastSwitchAt(sessionId)
+    if (switched === undefined || switched <= (this.masterNoted.get(sessionId) ?? 0)) return
+    this.masterNoted.set(sessionId, switched)
+    const text = `Your last turn failed for a passing reason (${String(error).slice(0, 200)}). A backup model serves this Session now; `
+      + 'continue what you were doing where it stopped.'
+    void this.background(this.host.sessions.prompt(this.host.masterId, `fallback:${switched}`, text, 'queue'))
   }
   /** Unsubscribes from host agent events and clears any pending transient-retry timers. */
   dispose(): void {

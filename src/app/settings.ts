@@ -163,6 +163,19 @@ export class Settings {
       try { await resolveRoleModel(this.host.context, model) }
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
+    // Check every changed fallback route against the live providers so a typo cannot silently disable failover.
+    const fallbacks = block === 'eval' ? candidate.eval.fallbacks : block === 'executor' ? candidate.executor.fallbacks : []
+    const previousFallbacks = block === 'eval' ? current.eval.fallbacks : block === 'executor' ? current.executor.fallbacks : []
+    if (JSON.stringify(fallbacks) !== JSON.stringify(previousFallbacks)) {
+      for (const [index, route] of fallbacks.entries()) {
+        const name = `fallback route ${index + 1} (${route.provider}/${route.model})`
+        if (model && route.provider === model.provider && route.model === model.model) {
+          throw new UserError('modelUnavailable', { block, error: `${name} repeats the primary model` })
+        }
+        try { await resolveRoleModel(this.host.context, route) }
+        catch (error) { throw new UserError('modelUnavailable', { block, error: `${name}: ${error instanceof Error ? error.message : String(error)}` }) }
+      }
+    }
     rules.guard?.(current, candidate, origin)
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')

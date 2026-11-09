@@ -4,7 +4,7 @@ import { cloneElement, createContext, useContext, useEffect, useId, useLayoutEff
 import type { ApiResponse } from '../app/api.ts'
 import type { FieldSpec, Localized } from '../sources/kind.ts'
 import { usePoll, type HistoryView, type Settings, type SettingsView, type SourceView } from './api.ts'
-import { Button, DisclosureRow, Icon, InfoTip, Input, SegmentedControl, Switch } from './controls.tsx'
+import { Button, DisclosureRow, Icon, InfoTip, Input, SegmentedControl, StateDot, Switch } from './controls.tsx'
 import { useDraft } from './draft.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute } from './route.ts'
@@ -100,6 +100,101 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
       {(models.find(model => model.id === current.model.trim())?.reasoning?.efforts ?? []).map(effort => <option key={effort.id}
         value={effort.id}>{effort.name}</option>)}
     </datalist>
+  </div>
+}
+
+type ChainRoute = NonNullable<RoleModel>
+type RouteRow = SettingsView['routes'][number]
+/**
+ * Ordered fallback chain for one role: every row is one Provider × model pair, arranged by drag or by the arrow buttons.
+ * A row shows the route's live cooldown state, so a failed provider is visible where its chain is edited.
+ */
+export function ModelChainField({ id, role, value, primary, onChange }: {
+  id: string; role: 'router' | 'worker'; value: ChainRoute[]; primary: RoleModel; onChange: (next: ChainRoute[]) => void
+}) {
+  const { t, call } = usePanel()
+  const { settings } = useSettings()
+  const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
+  const [error, setError] = useState<string>()
+  const [draft, setDraft] = useState({ provider: '', model: '', effort: '' })
+  const [dragging, setDragging] = useState<number | undefined>()
+  useEffect(() => { call('GET models').then(setCatalog, failure => setError(errorText(failure))) }, [call])
+  const states = settings.routes.filter(state => state.role === role)
+  const stateOf = (route: ChainRoute): RouteRow | undefined => states.find(state => state.provider === route.provider && state.model === route.model)
+  const same = (a: ChainRoute, b: ChainRoute) => a.provider === b.provider && a.model === b.model
+  const taken = (route: ChainRoute) => value.some(item => same(item, route)) || (primary !== null && same(primary, route))
+  const models = catalog?.groups.find(group => group.id === draft.provider)?.models ?? []
+  const efforts = models.find(model => model.id === draft.model)?.reasoning?.efforts ?? []
+  const candidate: ChainRoute | null = draft.provider.trim() && draft.model.trim()
+    ? { provider: draft.provider.trim(), model: draft.model.trim(), ...draft.effort ? { reasoningEffort: draft.effort } : {} } : null
+  const add = () => {
+    if (!candidate || taken(candidate)) return
+    onChange([...value, candidate])
+    setDraft({ provider: '', model: '', effort: '' })
+  }
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= value.length || from === to) return
+    const next = value.slice()
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved!)
+    onChange(next)
+  }
+  const label = (route: ChainRoute) => `${route.provider} / ${route.model}${route.reasoningEffort ? ` · ${route.reasoningEffort}` : ''}`
+  return <div className="dt-chain">
+    <div className="dt-field-head"><span>{t('fallbackTitle')}</span><InfoTip text={t('fallbackHint')} /></div>
+    {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
+    {value.length === 0 ? <p className="dt-hint">{t('fallbackEmpty')}</p> : <ol className="dt-chain-list">
+      {value.map((route, index) => {
+        const state = stateOf(route)
+        const cooling = state?.state === 'cooling'
+        return <li key={`${route.provider}/${route.model}`} className="dt-chain-row" data-dragging={dragging === index || undefined}
+          onDragOver={event => { if (dragging !== undefined) event.preventDefault() }}
+          onDrop={event => { event.preventDefault(); if (dragging !== undefined) move(dragging, index); setDragging(undefined) }}>
+          <span className="dt-chain-rank">{index + 1}</span>
+          <span className="dt-chain-handle" draggable title={t('fallbackDrag')} aria-hidden="true"
+            onDragStart={() => setDragging(index)} onDragEnd={() => setDragging(undefined)}>⠿</span>
+          <span className="dt-chain-route" title={label(route)}>{label(route)}</span>
+          {state && <span className="dt-chain-state" title={cooling && state.until ? t('fallbackStateCooling', { until: when(state.until, t('lang')) })
+            : t('fallbackStateReady')}>
+            <StateDot state={cooling ? 'warning' : 'done'} />
+          </span>}
+          <span className="dt-chain-actions">
+            <Button variant="ghost" size="sm" icon={<Icon name="chevron-up" size={14} />} aria-label={t('fallbackMoveUp')} title={t('fallbackMoveUp')}
+              disabled={index === 0} onClick={() => move(index, index - 1)} />
+            <Button variant="ghost" size="sm" icon={<Icon name="chevron-down" size={14} />} aria-label={t('fallbackMoveDown')} title={t('fallbackMoveDown')}
+              disabled={index === value.length - 1} onClick={() => move(index, index + 1)} />
+            <Button variant="ghost" size="sm" icon={<Icon name="trash" size={14} />} aria-label={t('fallbackRemove', { route: label(route) })}
+              title={t('fallbackRemove', { route: label(route) })}
+              onClick={() => onChange(value.filter((_, at) => at !== index))} />
+          </span>
+        </li>
+      })}
+    </ol>}
+    <div className="dt-chain-add">
+      <label className="dt-chain-add-label" htmlFor={`${id}-provider`}>{t('fallbackAddHint')}</label>
+      <div className="dt-grid3">
+        <select id={`${id}-provider`} className="dt-select" aria-label={t('modelProvider')} value={draft.provider}
+          onChange={event => setDraft({ provider: event.target.value, model: '', effort: '' })}>
+          <option value="">{t('modelProvider')}</option>
+          {catalog?.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
+        </select>
+        <select id={`${id}-model`} className="dt-select" aria-label={t('modelName')} value={draft.model} disabled={!draft.provider}
+          onChange={event => setDraft({ ...draft, model: event.target.value, effort: '' })}>
+          <option value="">{t('modelName')}</option>
+          {models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+        </select>
+        <select id={`${id}-effort`} className="dt-select" aria-label={t('modelEffort')} value={draft.effort} disabled={efforts.length === 0}
+          onChange={event => setDraft({ ...draft, effort: event.target.value })}>
+          <option value="">{t('modelEffortDefault')}</option>
+          {efforts.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
+        </select>
+      </div>
+      <div className="dt-chain-add-row">
+        <Button variant="outline" icon={<Icon name="plus" size={14} />} disabled={!candidate || taken(candidate)}
+          title={candidate && taken(candidate) ? t('fallbackDuplicate') : undefined} onClick={add}>{t('fallbackAdd')}</Button>
+        {candidate && taken(candidate) && <span className="dt-hint">{t('fallbackDuplicate')}</span>}
+      </div>
+    </div>
   </div>
 }
 

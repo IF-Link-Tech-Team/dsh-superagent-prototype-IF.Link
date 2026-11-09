@@ -8,4 +8,6 @@ export const LIMITS = {
   promptMaxChars: { min: 1000, max: 1_000_000 },
   admissionContextMaxPages: { min: 1, max: 100 },
   admissionContextTimeoutMs: { min: 1, max: 90_000 },
+  /** How many fallback routes one role may queue behind its primary model. */
+  fallbacks: { max: 5 },
 } as const

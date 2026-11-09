@@ -32,7 +32,8 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   const [provider, model] = all('.dt-model input')
   await type(provider as HTMLInputElement, 'worker-provider'); await type(model as HTMLInputElement, 'worker-model')
   await click(zh.save)
-  expect(server.settings.eval).toEqual({ mode: 'auto', timeoutSeconds: 180, model: { provider: 'worker-provider', model: 'worker-model' } })
+  expect(server.settings.eval).toEqual({ mode: 'auto', timeoutSeconds: 180, model: { provider: 'worker-provider', model: 'worker-model' },
+    fallbacks: [] })
   await click(find(zh['promptPart.runtime/work'], '.dt-settings-link'))
   await type(field<HTMLInputElement>(zh.maxWorkers), '5')
   // An empty root uses the default directory, which the field names instead of looking set.
@@ -55,7 +56,7 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click(zh.save)
   expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
-      model: 'worker-model', reasoningEffort: 'high' } })
+      model: 'worker-model', reasoningEffort: 'high' }, fallbacks: [] })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',
     'settings/executor'])
 })
@@ -144,4 +145,33 @@ it('lists the settings groups stages first, opens each stage\'s group from its s
   await remount()
   await click(tab(zh['tab.settings']))
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['promptPart.runtime/work'])
+})
+
+it('adds, reorders and removes fallback routes in the panel, and saves the order with the role', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  const select = (name: string) => document.querySelector<HTMLSelectElement>(`#dt-worker-chain-${name}`)!
+  const rows = () => [...document.querySelectorAll<HTMLElement>('.dt-chain-row')]
+  const add = async (provider: string, model: string) => {
+    await type(select('provider'), provider)
+    await type(select('model'), model)
+    await click(find(zh.fallbackAdd, '.dt-chain-add button'))
+  }
+  await add('backup-provider', 'backup-model')
+  await add('second-provider', 'second-model')
+  expect(rows().map(row => row.querySelector('.dt-chain-route')?.textContent))
+    .toEqual(['backup-provider / backup-model', 'second-provider / second-model'])
+  // A route already in the chain cannot be added twice, and the add button says why.
+  await type(select('provider'), 'backup-provider'); await type(select('model'), 'backup-model')
+  expect((find(zh.fallbackAdd, '.dt-chain-add button') as HTMLButtonElement).disabled).toBe(true)
+  expect(document.querySelector('.dt-chain-add-row')?.textContent).toContain(zh.fallbackDuplicate)
+  // The arrow buttons move a row without a pointer, which is what keyboard and touch users get.
+  await click(rows()[1]!.querySelector<HTMLButtonElement>('[aria-label="上移"]')!)
+  expect(rows().map(row => row.querySelector('.dt-chain-route')?.textContent))
+    .toEqual(['second-provider / second-model', 'backup-provider / backup-model'])
+  await click(rows()[0]!.querySelector<HTMLButtonElement>('[aria-label^="从备用链移除"]')!)
+  expect(rows().map(row => row.querySelector('.dt-chain-route')?.textContent)).toEqual(['backup-provider / backup-model'])
+  await click(zh.save)
+  expect(server.settings.executor.fallbacks).toEqual([{ provider: 'backup-provider', model: 'backup-model' }])
 })

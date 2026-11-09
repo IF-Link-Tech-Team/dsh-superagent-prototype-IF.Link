@@ -54,7 +54,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'memory/<file>', holds: 'one team memory file whole, such as TEAM.md or PROJECTS.md', executor: true },
   { name: 'journal', holds: 'the team journal entries, newest first, each with its date range, size and last update', executor: true },
   { name: 'journal/<file>', holds: 'one journal entry whole, such as 2026-10-05_10-11.md', executor: true },
-  { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
+  { name: 'models', holds: 'model providers, the DSH default, each role\'s model and the fallback routes it falls back to' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
@@ -247,7 +247,8 @@ const ROUTES: readonly Route[] = [
   ['models', async read => {
     const host = main(read), catalog = await host.context.sessionController.modelCatalog(), settings = host.store.settings()
     const roles = { orchestrator: settings.eval.model, worker: settings.executor.model }
-    return { default: catalog.default, roles, failures: catalog.failures,
+    const fallbacks = { orchestrator: settings.eval.fallbacks, worker: settings.executor.fallbacks }
+    return { default: catalog.default, roles, fallbacks, failures: catalog.failures,
       providers: catalog.groups.map(group => ({ id: group.id, name: group.name, count: group.models.length, read: `models/${group.id}` })) }
   }],
   ['models/', async read => {

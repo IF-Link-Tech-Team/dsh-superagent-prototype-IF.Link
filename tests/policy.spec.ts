@@ -253,8 +253,8 @@ describe('settings migration', () => {
       paused: true,
       sources: { feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: false }), github: { enabled: true, config: { pollSeconds: 120 } } },
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
-      eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },
-      executor: { model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
+      eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' }, fallbacks: [] },
+      executor: { model: null, fallbacks: [], maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)
   })
@@ -296,6 +296,9 @@ describe('assessment outcomes', () => {
     const scope = { scope: () => ({ listened: true as const, observed: true }) }
     const enabled = auto.policy.rules.find(rule => rule.enabled)!.id
     expect(settingsPolicy(auto, scope).admitsInferred([enabled])).toBe(true)
+    // While the main Session runs on a backup model, its judgement is provisional: inferred work waits for a person.
+    expect(settingsPolicy(auto, scope, { degraded: true }).admitsInferred([enabled])).toBe(false)
+    expect(settingsPolicy(auto, scope, { degraded: false }).admitsInferred([enabled])).toBe(true)
     expect(settingsPolicy(auto, scope).admitsInferred(['unknown'])).toBe(false)
     expect(settingsPolicy(auto, scope).admitsInferred([])).toBe(false)
     expect(settingsPolicy(settings('observe'), scope).admitsInferred([enabled])).toBe(false)

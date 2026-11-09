@@ -88,6 +88,8 @@ export interface PanelServer {
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
+  /** Route cooldown states reported beside the chain editors; empty unless a test sets them. */
+  routes?: ApiResponse<'GET settings'>['routes']
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
@@ -165,6 +167,8 @@ const stateView = (): StateView => ({
 })
 const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
+  // No route is cooling down in the panel fixtures unless a test says so.
+  routes: server.routes ?? [],
   blocks: { policy: { value: server.settings.policy, revision: server.revisions.policy ?? 0 },
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
     executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 } },
@@ -371,7 +375,9 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST setup/check': { answer: () => ({ restarting: true }) },
   'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
     groups: [{ id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
-      reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }) },
+      reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] },
+      { id: 'backup-provider', name: 'Backup provider', models: [{ id: 'backup-model', name: 'Backup model' }] },
+      { id: 'second-provider', name: 'Second provider', models: [{ id: 'second-model', name: 'Second model' }] }] }) },
   'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },
   'PUT prompts': { body: true, answer: ({ body }) => {
     const { revision } = server.prompts

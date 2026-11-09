@@ -69,6 +69,14 @@ export const RuleSchema = z.object({ id: RuleIdSchema, name: z.string().trim().m
 export type Rule = z.infer<typeof RuleSchema>
 export const RoleModelSchema = z.object({ provider: z.string().trim().min(1), model: z.string().trim().min(1), reasoningEffort: z.string().trim().min(1).optional() }).strict()
 export type RoleModel = z.infer<typeof RoleModelSchema>
+/**
+ * The ordered routes one role tries after its primary model fails. Each entry is one provider × model pair, so the same
+ * model may appear on two providers; an exact duplicate is refused rather than silently tried twice.
+ */
+export const FallbackSchema = z.array(RoleModelSchema).max(LIMITS.fallbacks.max)
+  .refine(routes => new Set(routes.map(route => `${route.provider}/${route.model}`)).size === routes.length, 'Duplicate fallback route')
+  .default([])
+export type Fallback = z.infer<typeof FallbackSchema>
 
 export const AllowedSchema = z.object({ id: z.string().trim().min(1).max(200), name: z.string().trim().max(100).optional() }).strict()
 const Weak = z.enum(['inferred', 'ignore'])
@@ -84,12 +92,16 @@ export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
   timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(120),
   model: RoleModelSchema.nullable().default(null),
+  /** Routes the main Session falls back to, in order, when its model request fails on the provider side. */
+  fallbacks: FallbackSchema,
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
 /** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
+  /** Routes an Executor Session falls back to, in order, when its model request fails on the provider side. */
+  fallbacks: FallbackSchema,
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
@@ -164,9 +176,12 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
   return effects
 }
 /** Build the active Policy for gating incoming Triggers and revalidating existing Ticket Mandates. */
-export function settingsPolicy(settings: Settings, sources: SourceScope): Policy {
+export function settingsPolicy(settings: Settings, sources: SourceScope, options: { degraded?: boolean } = {}): Policy {
   const version = policyVersion(settings)
   const mode = settings.eval.mode
+  // While the main Session runs off a fallback model, its semantic judgement is not the one the team configured:
+  // inferred work is left for a person instead of being accepted automatically.
+  const degraded = options.degraded === true
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
   const machineGate = (trigger: Trigger): GateResult => {
     const bot = trigger.actor.id ? listedBot(settings, trigger.actor) : undefined
@@ -209,7 +224,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       if (admission === 'inferred' && mode !== 'off') return { admissible: true, strength: 'inferred', basis: { ...basis, observation: { mode } } }
       return { admissible: false, reason: !allowed ? 'not_a_member' : receivable && admission === 'ignore' ? 'admission_ignored' : 'no_mention' }
     },
-    admitsInferred: rules => mode === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
+    admitsInferred: rules => !degraded && mode === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
     revalidate(mandate: Mandate) {
       // Revalidation rules follow docs/002 (Eval path; Resume revalidates).
       const { basis } = mandate

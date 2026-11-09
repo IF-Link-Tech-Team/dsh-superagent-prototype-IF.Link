@@ -1,6 +1,7 @@
 /** Concurrency, retry, and validation tests for settings saves, pause toggling, and policy synchronization. */
 import { afterEach, expect, it, vi } from 'vitest'
 import { UserError } from '../src/core/index.ts'
+import { SettingsSchema } from '../src/policy.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
@@ -98,4 +99,29 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   await expect(settings.sync('feishu')).rejects.toThrow(new UserError('nothingToSync', { source: 'feishu' }))
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
+})
+it('checks every fallback route against the live providers, refuses one that repeats the primary, and saves a valid chain', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const llm = (h.ctx as unknown as { llm: { resolveCallConfig: ReturnType<typeof vi.fn> } }).llm
+  llm.resolveCallConfig.mockImplementation(async (value: { model: string }) => {
+    if (value.model === 'missing') throw new Error('unknown provider nowhere')
+    return value
+  })
+  const evaluation = store.settings().eval
+  const revision = store.blockRevision('eval')
+  await expect(settings.save('eval', { ...evaluation, model, fallbacks: [{ provider: 'p', model: 'missing' }] }, revision, 'panel'))
+    .rejects.toThrow('fallback route 1 (p/missing): unknown provider nowhere')
+  await expect(settings.save('eval', { ...evaluation, model, fallbacks: [model] }, revision, 'panel'))
+    .rejects.toThrow('fallback route 1 (worker-provider/worker-model) repeats the primary model')
+  // A refused save writes nothing.
+  expect(store.settings().eval).toEqual(evaluation)
+  await settings.save('eval', { ...evaluation, model, fallbacks: [{ provider: 'backup', model: 'backup-1' }] }, revision, 'panel')
+  expect(store.settings().eval.fallbacks).toEqual([{ provider: 'backup', model: 'backup-1' }])
+  llm.resolveCallConfig.mockRestore()
+})
+it('refuses the same route twice in one chain', () => {
+  const route = { provider: 'p', model: 'm' }
+  expect(() => SettingsSchema.parse({ eval: { fallbacks: [route, route] } })).toThrow('Duplicate fallback route')
+  expect(SettingsSchema.parse({ eval: { fallbacks: [route, { provider: 'p', model: 'n' }] } }).eval.fallbacks).toHaveLength(2)
 })

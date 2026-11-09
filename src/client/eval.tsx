@@ -8,7 +8,7 @@ import { Button, DisclosureRow, Icon, InfoTip, Input, Pill, SegmentedControl, Sw
 import { SaveBar } from './draft.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { DecisionLine } from './rows.tsx'
-import { ConfigHistory, Field, Fields, ModelField, SourceField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
+import { ConfigHistory, Field, Fields, ModelChainField, ModelField, SourceField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { localized, valueLabel, when } from './text.ts'
 import { Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
 
@@ -210,6 +210,8 @@ function EvalBlock() {
       </Field>
       <Section title={t('assessorModel')} hint={t('assessorModelHint')}>
         <ModelField id="dt-eval-model" value={value.model} onChange={model => edit({ model })} />
+        <ModelChainField id="dt-eval-chain" role="router" primary={value.model} value={value.fallbacks}
+          onChange={fallbacks => edit({ fallbacks })} />
       </Section>
     </Fields>
     <SaveBar {...draft} onDiscard={draft.discard} />

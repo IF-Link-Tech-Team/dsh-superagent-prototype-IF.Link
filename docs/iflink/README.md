@@ -21,6 +21,7 @@
 | 别人的记忆产品怎么做，我们借鉴了什么 | [hermes-memory-research.md](hermes-memory-research.md) |
 | Agent 该在什么情况下说话、什么情况下闭嘴 | [router-prompts.md](router-prompts.md) |
 | 什么请求该转成任务、什么该拒绝 | [policy-rules.md](policy-rules.md) |
+| 模型挂了怎么自动换、备用链怎么在面板里拖 | [model-fallback-plan.md](model-fallback-plan.md) |
 | 更上游的思考：super-agent 的分层与交互 | [super-agent-design.md](super-agent-design.md) |
 
 ## 三点可能对别人有用的结论
