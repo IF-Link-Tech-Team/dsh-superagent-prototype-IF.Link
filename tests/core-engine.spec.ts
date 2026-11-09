@@ -16,6 +16,8 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
   const repo = new MemoryRepositories()
   const outbox: OutboundMessage[] = []
   const withdrawn: string[] = []
+  /** Message ids a Channel delivered, which the Outbox reports as `sent`. */
+  const sent = new Set<string>()
   const requests: Candidate[] = []
   const assessor: Assessor = { request: vi.fn(candidate => { requests.push(candidate) }), release: vi.fn() }
   const launches: [Ticket, Assignment][] = []
@@ -37,7 +39,7 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
   const scope: EngineOptions['scope'] = { scope: t => t.meta.blocked ? { listened: false, reason: 'chat not allowed' } : { listened: true, observed: false } }
   const queued: EngineOptions['outbox'] = {
     send: message => { if (!outbox.some(item => item.id === message.id)) outbox.push(message) },
-    status: id => outbox.some(item => item.id === id) ? 'pending' : undefined,
+    status: id => sent.has(id) ? 'sent' : outbox.some(item => item.id === id) ? 'pending' : undefined,
     withdraw: id => { withdrawn.push(id) },
   }
   const engine = new Engine({ repo, scope, policy: () => policy, assessor, executor, outbox: queued,
@@ -61,7 +63,7 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
   const read = (ticketId: string) => engine.inputsRead(ticketId, repo.tickets.get(ticketId)!.inputs.flatMap(input =>
     input.kind === 'trigger' && input.readAt === null ? [input.id] : []))
   const decide = (candidate: Candidate, outcome: Outcome) => engine.decide(candidate.triggers[0]!.id, { ...outcome, evalId: candidate.evalId })
-  return { repo, engine, outbox, withdrawn, requests, assessor, executor, delivered, settle, pump, read, decide,
+  return { repo, engine, outbox, withdrawn, sent: (id: string) => { sent.add(id) }, requests, assessor, executor, delivered, settle, pump, read, decide,
     setVersion: (value: string) => { version = value }, setPaused: (value: boolean) => { paused = value }, tick: (seconds: number) => { clock += seconds } }
 }
 function accepted(h: ReturnType<typeof harness>, id = '1', thread = 't1') {
@@ -121,7 +123,10 @@ describe('eval', () => {
     expect(ticket).not.toHaveProperty('ended')
     expect(ticket.assignments).toEqual([expect.objectContaining({ state: 'running', startedAt: expect.any(String) })])
     expect(h.repo.threads.get('chat:t1')?.subscriptions).toEqual([ticket.id])
-    expect(h.outbox).toEqual([{ id: key('ack', '1'), channel: trigger('1').channel, text: 'ok', kind: 'acknowledgement', ticketId: ticket.id }])
+    // The mark on the person's message comes first; the acknowledgement a person reads follows it.
+    expect(h.outbox[0]).toMatchObject({ id: key('react', '1'), kind: 'reaction', reaction: 'received', ticketId: ticket.id })
+    expect(h.outbox.filter(item => item.kind !== 'reaction'))
+      .toEqual([{ id: key('ack', '1'), channel: trigger('1').channel, text: 'ok', kind: 'acknowledgement', ticketId: ticket.id }])
     expect(h.executor.start).toHaveBeenCalledOnce()
   })
   it('refuses to decide an eval that a later eval replaced, and decides the later one', async () => {
@@ -1013,7 +1018,7 @@ describe('replies', () => {
     const ticketId = accepted(h).ticketId!
     // The acknowledgement of the accept stays; a later request for one reuses it.
     expect(h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '1', text: 'On it' })).toEqual({ id: key('ack', '1'), status: 'pending', reused: true })
-    expect(h.outbox.map(message => message.text)).toEqual(['ok'])
+    expect(h.outbox.filter(item => item.kind !== 'reaction').map(message => message.text)).toEqual(['ok'])
     h.engine.receive(trigger('2', { actor: guest }))
     expect(h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'Looking' })).toEqual({ id: key('ack', '2'), status: 'pending', reused: false })
     h.engine.receive(trigger('3', { human: false }))
@@ -1217,7 +1222,7 @@ describe('Evals across Policy versions, revoked Mandates and mixed batches', () 
     expect(h.requests.at(-1)!.triggers.map(item => item.id)).toEqual(['1', '2'])
     const decision = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Fix', scope: 'small', reason: 'r', acknowledgement: 'ok' })
     expect(h.repo.tickets.get(decision.ticketId!)!.origin).toEqual({ triggerId: '1', triggerIds: ['1', '2'] })
-    expect(h.outbox).toEqual([expect.objectContaining({ id: key('ack', '1'), channel: trigger('1').channel })])
+    expect(h.outbox.filter(item => item.kind !== 'reaction')).toEqual([expect.objectContaining({ id: key('ack', '1'), channel: trigger('1').channel })])
   })
 })
 describe('gaps', () => {
@@ -1617,5 +1622,68 @@ describe('ignores from the card', () => {
     // Accepting an inferred candidate still takes an assessment's matched rules.
     h.engine.receive(trigger('5', { actor: guest })); h.engine.reevaluate('5'); h.pump()
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
+  })
+})
+
+describe('marks on the message a ticket took up', () => {
+  const marks = (h: ReturnType<typeof harness>) => h.outbox.filter(item => item.kind === 'reaction').map(item => item.reaction)
+  it('marks an explicit request ahead of its acknowledgement, and leaves the finished mark when the work ends', () => {
+    const h = harness()
+    const decision = accepted(h)
+    // The mark goes out first: the Channel sends it before the acknowledgement a person reads.
+    expect(h.outbox.map(item => [item.kind, item.reaction ?? null])).toEqual([['reaction', 'received'], ['acknowledgement', null]])
+    h.sent(key('react', '1'))
+    h.engine.report(decision.ticketId!, { state: 'ready', summary: 'done' })
+    const ended = h.repo.tickets.get(decision.ticketId!)!.ended!
+    expect(h.outbox.at(-1)).toMatchObject({ id: key('react-end', '1', ended.at), kind: 'reaction', reaction: 'finished' })
+  })
+  it('takes the mark away when a person stops the ticket', () => {
+    const h = harness()
+    const decision = accepted(h)
+    h.sent(key('react', '1'))
+    h.engine.stopTicket(decision.ticketId!, 'never mind')
+    expect(h.outbox.at(-1)).toMatchObject({ kind: 'reaction', reaction: 'withdrawn' })
+  })
+  it('marks nothing for work an assessment inferred, whose person did not ask the agent', () => {
+    const h = harness({ admitsInferred: rules => rules.includes('enabled') })
+    accepted(h)
+    // The guest's message reached the first ticket's Thread, which marks it as the follow-up it is; the inferred Ticket the
+    // assessment accepts marks nothing of its own, since nobody asked the agent for that work.
+    h.engine.receive(trigger('2', { actor: guest })); h.engine.reevaluate('2'); h.pump()
+    const decision = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Fix', scope: 'small', reason: 'rule', rules: ['enabled'] })
+    expect(decision).toMatchObject({ kind: 'accept', strength: 'inferred' })
+    expect(marks(h)).toEqual(['received', 'received'])
+    expect(h.outbox.filter(item => item.kind === 'reaction' && item.ticketId === decision.ticketId)).toEqual([])
+    h.sent(key('react', '2'))
+    h.engine.report(decision.ticketId!, { state: 'ready', summary: 'done' })
+    expect(h.outbox.filter(item => item.kind === 'reaction' && item.reaction === 'finished' && item.ticketId === decision.ticketId)).toEqual([])
+  })
+  it('marks a follow-up where the person wrote it, and opens every mark again when the ticket resumes', () => {
+    const h = harness()
+    const decision = accepted(h)
+    h.sent(key('react', '1'))
+    h.engine.report(decision.ticketId!, { state: 'ready', summary: 'done' })
+    expect(h.outbox.filter(item => item.reaction === 'finished')).toHaveLength(1)
+    // A person's message on the ticket's Thread resumes it: it is marked where they wrote it, and the finished mark on the
+    // message the work started from goes back to working.
+    h.engine.receive(trigger('2')); h.pump(); h.settle()
+    expect(h.outbox.at(-2)).toMatchObject({ id: key('react', '2'), kind: 'reaction', reaction: 'received' })
+    expect(h.outbox.at(-1)).toMatchObject({ id: key('react-reopen', '1', h.repo.tickets.get(decision.ticketId!)!.assignments.at(-1)!.createdAt),
+      kind: 'reaction', reaction: 'reopened' })
+    expect(h.repo.tickets.get(decision.ticketId!)!.marks).toEqual(['1', '2'])
+    // Done again, every marked message says so.
+    h.sent(key('react', '2'))
+    h.engine.report(decision.ticketId!, { state: 'ready', summary: 'done again' })
+    expect(h.outbox.filter(item => item.reaction === 'finished')).toHaveLength(2)
+  })
+  it('marks a question the main Session answers without a ticket, ahead of the answer', () => {
+    const h = harness()
+    h.engine.receive(trigger('7', { addressed: 'mention' })); h.pump()
+    h.engine.reply({ purpose: 'answer', triggerId: '7', text: 'It is 3.' })
+    expect(h.outbox.map(item => [item.kind, item.reaction ?? null])).toEqual([['reaction', 'received'], ['reply', null]])
+    // A message nobody addressed gets no mark, even when it is answered.
+    h.engine.receive(trigger('8')); h.pump()
+    h.engine.reply({ purpose: 'answer', triggerId: '8', text: 'Also 3.' })
+    expect(h.outbox.map(item => [item.kind, item.reaction ?? null]).slice(2)).toEqual([['reply', null]])
   })
 })

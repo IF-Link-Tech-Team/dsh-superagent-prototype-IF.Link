@@ -68,8 +68,27 @@ export interface Executor {
   stop(ticket: Ticket, assignment: Assignment, reason: string): void
 }
 
-/** A message for a Channel; `ticketId` names the Ticket it is for, when there is one. */
-export interface OutboundMessage { id: string; channel: ChannelRef; text: string; kind: 'acknowledgement' | 'reply' | 'notice'; ticketId?: string }
+/**
+ * The mark a Channel puts on the message a person wrote, when it can mark one: `received` takes the message up, `finished`
+ * says the work it asked for is done, `reopened` takes that back while a follow-up resumes the work, and `withdrawn` takes
+ * the mark away because the work ended otherwise.
+ */
+export type ReactionKind = 'received' | 'finished' | 'reopened' | 'withdrawn'
+/**
+ * A message for a Channel; `ticketId` names the Ticket it is for, when there is one. A `reaction` carries no text: the
+ * Source decides how its own channel draws a mark, such as a Feishu emoji reaction.
+ */
+export interface OutboundMessage {
+  id: string
+  channel: ChannelRef
+  text: string
+  kind: 'acknowledgement' | 'reply' | 'notice' | 'reaction'
+  ticketId?: string
+  /** Which mark, for `kind: 'reaction'`; other kinds carry none. */
+  reaction?: ReactionKind
+  /** The Trigger whose message a mark is on, so the Channel can mark the message the Ticket took up. */
+  triggerId?: string
+}
 /** A queued message waits (`pending`), went out (`sent`), or was dropped because its conversation can never receive it (`dropped`). */
 export type ReplyStatus = 'pending' | 'sent' | 'dropped'
 /** The messages queued for Channels; the Engine queues them inside its commands, and a sender delivers them later. */

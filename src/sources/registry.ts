@@ -90,11 +90,13 @@ export class SourceRegistry implements SourceScope {
   }
   /**
    * Sends a message idempotently through its Channel's kind; returns `'waiting'` while the kind is not installed, or
-   * `'gone'` when the target (or a kind without channels) can never receive it.
+   * `'gone'` when the target (or a kind without channels) can never receive it. A mark goes to the kind's `react`, and a
+   * kind that makes no marks leaves it `gone`.
    */
   async send(message: OutboundMessage, commands: Commands): Promise<'sent' | 'gone' | 'waiting'> {
     const kind = this.kinds.get(message.channel.source)
     if (!kind) return 'waiting'
+    if (message.kind === 'reaction') return kind.channel?.react ? kind.channel.react({ commands }, message) : 'gone'
     return kind.channel ? kind.channel.send({ commands }, message) : 'gone'
   }
   link(channel: ChannelRef, links: ChannelLinks): ChannelLink {

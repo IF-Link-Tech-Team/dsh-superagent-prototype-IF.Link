@@ -50,6 +50,7 @@ export class Tickets extends EnginePart {
     const assignment = this.newAssignment(ticket)
     this.repo.tickets.save(ticket)
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
+    if (primary && mandate.strength === 'explicit') this.mark(ticket, primary)
     if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, outcome.acknowledgement)
     this.options.executor.start(this.require(id), assignment)
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
@@ -127,6 +128,7 @@ export class Tickets extends EnginePart {
     this.repo.triggers.saveDisposition(trigger.id, { ...disposition, fanout: [...new Set([...disposition.fanout, ticketId])],
       ...followed?.length ? { context: followed } : {} })
     const ticket = this.require(ticketId)
+    this.mark(ticket, trigger)
     const id = key('input', ticketId, 'trigger', trigger.id)
     const existing = ticket.inputs.find(input => input.id === id)
     const at = this.now()
@@ -244,6 +246,18 @@ export class Tickets extends EnginePart {
     else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.options.executor.start(ticket, latest)
   }
   /**
+   * Queue the mark a Channel puts on a person's message the ticket took up: the message it was accepted from, one it took as
+   * a follow-up, or one the main Session attached to it. The ticket records each marked message, so its end marks them all and
+   * its resume opens them again. Queued inside the caller's transaction, ahead of anything a person reads.
+   */
+  mark(ticket: Ticket, trigger: Trigger): void {
+    if (!trigger.human || !trigger.channel || ticket.marks?.includes(trigger.id)) return
+    this.replies.mark(trigger, ticket.id)
+    ticket.marks = [...ticket.marks ?? [], trigger.id]
+    ticket.updatedAt = this.now()
+    this.repo.tickets.save(ticket)
+  }
+  /**
    * Resume an ended ticket under its unchanged Mandate when a person's message on one of its Threads waits for it: no Eval
    * and no Decision, since nothing new is authorized. One whose Mandate the current Policy no longer holds stays ended and
    * takes nothing (see `refuse`). While processing is paused the message waits, and the first pass after the pause resumes
@@ -265,6 +279,7 @@ export class Tickets extends EnginePart {
     const resumed: TicketInput = { id: key('input', ticket.id, 'resumed', first.triggerId), kind: 'resumed', triggerId: first.triggerId, at }
     ticket.inputs.push(resumed); ticket.undelivered.unshift(resumed.id)
     this.repo.tickets.save(ticket)
+    this.replies.reopened(ticket, at)
     this.options.executor.start(ticket, assignment)
     this.emit('ticket.resumed', { ticketId, triggerId: first.triggerId })
   }
@@ -358,6 +373,7 @@ export class Tickets extends EnginePart {
     for (const assignment of stopping) { assignment.state = 'ended'; assignment.endedAt = at }
     this.repo.tickets.save(ticket)
     this.letGo(ticketId, waiting, left)
+    this.replies.ended(ticket)
     this.emit('ticket.ended', { ticketId, by, outcome, ...why })
     for (const assignment of stopping) this.options.executor.stop(ticket, assignment, reason ?? outcome)
   }

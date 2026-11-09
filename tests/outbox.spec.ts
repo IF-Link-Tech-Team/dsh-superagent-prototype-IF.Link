@@ -40,3 +40,26 @@ it('keeps a message for a Source that is not installed waiting, and sends it onc
   await at(5000)
   expect([h.runtime.outbox.status('waiting'), sent.map(message => message.id)]).toEqual(['sent', ['waiting']])
 })
+
+it('lets a mark go after one failed attempt, so the messages queued behind it still arrive', async () => {
+  const lark = vi.mocked(Commands.prototype.lark)
+  lark.mockClear()
+  // The mark cannot be placed; the acknowledgement queued behind it for the same ticket and conversation still goes out.
+  lark.mockRejectedValueOnce(new Error('boom'))
+  h.runtime.outbox.send({ id: 'mark', channel: feishu('1', 'x').channel!, text: '', kind: 'reaction', reaction: 'received', ticketId: 't1' })
+  h.runtime.outbox.send({ id: 'said', channel: feishu('1', 'x').channel!, text: '已处理。', kind: 'reply', ticketId: 't1' })
+  await h.runtime.sendReplies()
+  expect(h.runtime.outbox.status('mark')).toBe('dropped')
+  expect(h.runtime.outbox.status('said')).toBe('sent')
+  expect(JSON.stringify(lark.mock.calls)).toContain('已处理。')
+})
+
+it('draws a mark on a Feishu message through the Source kind, as the bot', async () => {
+  const lark = vi.mocked(Commands.prototype.lark)
+  lark.mockClear()
+  h.runtime.outbox.send({ id: 'mark', channel: feishu('1', 'x').channel!, text: '', kind: 'reaction', reaction: 'received', ticketId: 't1' })
+  await h.runtime.sendReplies()
+  expect(h.runtime.outbox.status('mark')).toBe('sent')
+  const create = lark.mock.calls.map(([args]) => args).find(args => args.slice(0, 3).join(' ') === 'im reactions create')!
+  expect(JSON.parse(create[6]!)).toEqual({ reaction_type: { emoji_type: 'OnIt' } })
+})

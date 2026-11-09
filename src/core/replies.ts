@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, ticketOutcome } from './model.ts'
-import type { ChannelRef, Ticket, Trigger } from './model.ts'
+import type { ChannelRef, Strength, Ticket, Trigger } from './model.ts'
 import type { ReplyStatus } from './ports.ts'
 import { EnginePart } from './part.ts'
 
@@ -42,6 +42,50 @@ export class Replies extends EnginePart {
    */
   acknowledgeAccepted(ticketId: string, trigger: Trigger, text: string): void {
     if (trigger.channel && trigger.human) this.options.outbox.send({ id: key('ack', trigger.id), channel: trigger.channel, text, kind: 'acknowledgement', ticketId })
+  }
+  /**
+   * Queue the mark a Channel puts on the message an explicit request was accepted from, before its acknowledgement goes out.
+   * Work an assessment inferred from an unaddressed message earns none, since the person did not ask the agent and the mark
+   * would read as an interruption. A Channel that cannot mark a message drops it.
+   */
+  tookUp(ticketId: string | undefined, trigger: Trigger, strength: Strength): void {
+    if (strength !== 'explicit') return
+    this.mark(trigger, ticketId)
+  }
+  /** Queue the working mark a Channel puts on one of the ticket's messages; the message keeps its id, so it is queued once. */
+  mark(trigger: Trigger, ticketId: string | undefined): void {
+    if (!trigger.channel || !trigger.human) return
+    this.options.outbox.send({ id: key('react', trigger.id), channel: trigger.channel, text: '', kind: 'reaction', triggerId: trigger.id,
+      ...ticketId ? { ticketId } : {}, reaction: 'received' })
+  }
+  /**
+   * Queue what the ticket's end leaves on each message it marked: finished work keeps a mark saying so, and an end any other
+   * way takes the mark away. A message whose working mark never went out keeps none, so a mark never appears on its own.
+   */
+  ended(ticket: Ticket): void {
+    const outcome = ticket.ended?.outcome
+    const reaction = outcome === 'completed' || outcome === 'merged' ? 'finished' : 'withdrawn'
+    for (const trigger of this.marked(ticket)) {
+      this.options.outbox.send({ id: key('react-end', trigger.id, ticket.ended?.at ?? ''), channel: trigger.channel!, text: '', kind: 'reaction',
+        ticketId: ticket.id, reaction })
+    }
+  }
+  /**
+   * Take the marks on the ticket's messages back to working, when a person's follow-up resumes it: the finished mark goes and
+   * the working one returns, so the thread reads as working again until the ticket ends.
+   */
+  reopened(ticket: Ticket, at: string): void {
+    for (const trigger of this.marked(ticket)) {
+      this.options.outbox.send({ id: key('react-reopen', trigger.id, at), channel: trigger.channel!, text: '', kind: 'reaction',
+        ticketId: ticket.id, reaction: 'reopened' })
+    }
+  }
+  /** The ticket's marked messages whose working mark went out, each with its Channel; every other marked message has none. */
+  private marked(ticket: Ticket): (Trigger & { channel: NonNullable<Trigger['channel']> })[] {
+    return (ticket.marks ?? []).flatMap(id => {
+      const trigger = this.repo.triggers.get(id)
+      return trigger?.channel && this.options.outbox.status(key('react', id)) === 'sent' ? [trigger as Trigger & { channel: NonNullable<Trigger['channel']> }] : []
+    })
   }
   /** Withdraw a ticket's question for a person from the outbox, unless it went out already. */
   withdrawAttention(attentionId: string): void { this.options.outbox.withdraw(key('attention-reply', attentionId)) }
@@ -83,6 +127,8 @@ export class Replies extends EnginePart {
     const asker = attention?.triggerId ? this.repo.triggers.get(attention.triggerId) : undefined
     const channel = request.purpose === 'answer' ? trigger!.channel : asker?.channel ?? (ticket ? this.sourceChannel(ticket) : undefined)
     if (!channel) throw new UserError('noChannel')
+    // An answer sent without a ticket still takes a person's question up: mark it before the answer goes out, as an accept does.
+    if (request.purpose === 'answer' && trigger?.addressed) this.tookUp(ticket?.id, trigger, 'explicit')
     this.options.outbox.send({ id, channel, text: request.text, kind: 'reply', ...ticket ? { ticketId: ticket.id } : {} })
     if (request.purpose === 'answer' && ticket && trigger && ticket.answers?.includes(trigger.id)) {
       ticket.answers = ticket.answers.filter(item => item !== trigger.id)

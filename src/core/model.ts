@@ -305,6 +305,11 @@ export interface Ticket {
   execution?: Execution
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
   delivery?: { error: string; at: string }
+  /**
+   * The person's messages a Channel marked when the ticket took them up, by Trigger id, oldest first: the one it was accepted
+   * from, then its follow-ups. Its end marks them all as done, and its resume takes those marks back to working.
+   */
+  marks?: string[]
 }
 /**
  * A Thread a ticket follows, by its key: `own` when the ticket opened it, such as its own pull request, and when and how it

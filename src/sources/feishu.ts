@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { FeishuBotSchema } from '../deployment.ts'
-import { feishuLink, sendFeishu } from './feishu-channel.ts'
+import { feishuLink, reactFeishu, sendFeishu } from './feishu-channel.ts'
 import { feishuThreadContext } from './feishu-read.ts'
 import { refreshChatNames, runFeishu } from './feishu-loops.ts'
 import { SOURCE, feishuTriggerId } from './feishu-trigger.ts'
@@ -57,11 +57,11 @@ export const feishuKind: SourceKind<FeishuConfig> = {
     if (chat) return { listened: true, observed: chat.listen === 'all', row: chat.chatId }
     return config.otherChats === 'mentions' ? { listened: true, observed: false, row: 'other' } : { listened: false, reason: 'chat_not_allowed' }
   },
-  // A reply goes only to a chat the Source still receives.
+  // A reply or a mark goes only to a chat the Source still receives.
   channel: {
     allowed: (address, config) =>
       feishuKind.scope!({ meta: { chatId: address.chatId ?? '', direct: address.direct === 'true' } }, config).listened,
-    send: sendFeishu, link: feishuLink,
+    send: sendFeishu, react: reactFeishu, link: feishuLink,
   },
   threadContext: feishuThreadContext,
   find: query => ({ threads: [], terms: [...new Set(query.match(/om_[A-Za-z0-9_-]+/g) ?? [])] }),

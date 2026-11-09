@@ -51,6 +51,12 @@ export interface SourceChannel<C> {
    * @throws when delivery failed but may succeed on a later retry.
    */
   send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
+  /**
+   * Draws a mark on the message a Ticket took up, or the one its end implies, as this Source's own channel can; a kind
+   * without `react` makes none, and its marks settle `gone`. Returns `'gone'` when the target message is gone too.
+   * @throws when the mark failed but may succeed on a later retry.
+   */
+  react?(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
   /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
 }

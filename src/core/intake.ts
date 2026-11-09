@@ -49,6 +49,9 @@ export class Intake extends EnginePart {
     for (const [ticketId, { ticket, context: followed }] of reached) {
       this.tickets.addInput(ticket, { id: key('input', ticketId, 'trigger', trigger.id), kind: 'trigger', triggerId: trigger.id, at,
         ...trigger.human ? { human: true } : {}, ...followed ? { context: true } : {} })
+      // A person's follow-up the ticket takes is marked where they wrote it, as the message it was accepted from was; a Thread
+      // the ticket only follows for context lends no authority and takes no mark.
+      if (!followed) this.tickets.mark(ticket, trigger)
     }
     const fanout = [...reached.keys()], context = fanout.filter(id => reached.get(id)!.context)
     const disposition = { fanout, ...context.length ? { context } : {}, at }
