@@ -2,6 +2,9 @@
 import { z } from 'zod'
 import type { Trigger } from '../core/index.ts'
 import { validItems, type Commands } from '../infra/commands.ts'
+
+/** The only capability these readers need: one CLI call. A round's cache stands in for it without a subclass. */
+export type FeishuLark = Pick<Commands, 'lark'>
 import { admissionImageKeys, readAdmissionImage } from './feishu-image.ts'
 import { feishuRef, feishuTime, HistoricalMessageSchema, HistoryPageSchema, historyText, withMentionNames, type HistoricalMessage }
   from './feishu-trigger.ts'
@@ -27,7 +30,7 @@ const threadSchema = z.object({ messages: z.array(z.unknown()), has_more: z.bool
   thread_id: z.string() })
 
 /** Reads the CLI-provided AppLink for the source message alone, without retaining expanded thread content. */
-export async function readFeishuLink(commands: Commands, ref: FeishuRef): Promise<string> {
+export async function readFeishuLink(commands: FeishuLark, ref: FeishuRef): Promise<string> {
   const id = messageId.parse(ref.messageId)
   const result = z.object({ messages: z.array(z.object({ message_id: messageId, chat_id: z.string(), message_app_link: z.url().optional(), deleted: z.boolean().optional() })) })
     .parse(await commands.lark(['im', '+messages-mget', '--message-ids', id, '--no-reactions']))
@@ -51,7 +54,7 @@ export function feishuResource(resource: string) {
   }
   return { triggerId: match[1]!, section: match[2]!, cursor: match[3] ? decodeURIComponent(match[3]) : undefined }
 }
-async function sourceOf(commands: Commands, ref: FeishuRef) {
+async function sourceOf(commands: FeishuLark, ref: FeishuRef) {
   const id = messageId.parse(ref.messageId)
   // Use the raw mget endpoint to read parent/root IDs without triggering CLI thread expansion.
   const params = JSON.stringify({ message_ids: [id] })
@@ -66,7 +69,7 @@ async function sourceOf(commands: Commands, ref: FeishuRef) {
 export interface FeishuPage<M> { status: string; thread_id?: string; messages: M[]; next_resource: string | null; skipped?: number }
 export interface FeishuOne<M> { status: string; message: M | null }
 /** Fetches one message or a bounded topic page of a Trigger's source message with explicit pagination continuation. */
-export async function readFeishu(commands: Commands, ref: FeishuRef, resource: string, pageSize: number,
+export async function readFeishu(commands: FeishuLark, ref: FeishuRef, resource: string, pageSize: number,
   order: 'asc' | 'desc' = 'asc'): Promise<FeishuPage<FeishuMessage> | FeishuOne<FeishuMessage>> {
   const request = feishuResource(resource)
   if (request.triggerId !== ref.triggerId) throw new Error('A Feishu source trigger is required')
@@ -112,7 +115,7 @@ function historyView(message: HistoricalMessage): ContextMessage {
     ...message.parent_id ? { reply_to: message.parent_id } : {}, ...message.message_app_link ? { url: message.message_app_link } : {} }
 }
 /** Reads chat messages surrounding `ref.at` (five before and five after on initial read, then pages of ten older messages). */
-async function chatAround(commands: Commands, ref: FeishuRef, cursor: string | undefined, before = 5,
+async function chatAround(commands: FeishuLark, ref: FeishuRef, cursor: string | undefined, before = 5,
   after = 5): Promise<FeishuPage<ContextMessage>> {
   const time = Date.parse(ref.at ?? '')
   if (!Number.isFinite(time)) throw new Error('The source Feishu message has no time to read the chat around')
@@ -133,7 +136,7 @@ async function chatAround(commands: Commands, ref: FeishuRef, cursor: string | u
   const next = more ? `feishu/${ref.triggerId}/around/${encodeURIComponent(earlier.page_token!)}` : null
   return { status: 'available', messages, next_resource: next }
 }
-export async function feishuRead(commands: Commands, ref: FeishuRef, resource: string,
+export async function feishuRead(commands: FeishuLark, ref: FeishuRef, resource: string,
   pageSize: number): Promise<FeishuPage<ContextMessage> | FeishuOne<ContextMessage>> {
   const request = feishuResource(resource)
   if (request.section === 'around') {

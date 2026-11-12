@@ -4,7 +4,8 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
-import { historyFailureHealth, runFeishu } from '../src/sources/feishu-loops.ts'
+import { admitsBackfill, feishuCache, historyFailureHealth, noteFeishuEvent, requestFeishuCatchUp, resetFeishuLoops, runFeishu, threadDue }
+  from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
@@ -144,8 +145,82 @@ describe('feishu source', () => {
     expect(h.store.get('thread-seen:feishu:oc_1:om_root')).toEqual(expect.arrayContaining(['om_reply', 'om_mine', 'om_old']))
     expect(h.store.threads.get('feishu:oc_1:om_root')?.meta).toMatchObject({ threadId: 'omt_1', url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_1', facts: { chat: { value: 'oc_1' } } })
     lark.mockRejectedValue(new Error('rate limited'))
+    // A thread is read at most every few minutes, so the next due poll is what sees the failure.
+    resetFeishuLoops()
     await pollFeishuThreads(h)
     expect(h.store.threads.get('feishu:oc_1:om_root')?.meta.pollError).toContain('rate limited')
+    h.store.close()
+  })
+  it('reads a followed thread once every few minutes, and lets a quiet ticketless one go until the next catch-up', async () => {
+    resetFeishuLoops()
+    const h = host()
+    const source = feishuTrigger({ message_id: 'om_root', chat_id: 'oc_1', chat_type: 'group', sender_id: MEMBER, sender_type: 'user',
+      content: 'fix', create_time: '1' }, 'ou_bot', 'cli_bot')!
+    h.store.triggers.save(source)
+    subscribed(h, source.threads[0]!, { chatId: 'oc_1', messageId: 'om_root', sourceTriggerId: source.id })
+    h.store.threads.save({ ...h.store.threads.get('feishu:oc_1:om_root')!, lastAt: new Date().toISOString() })
+    const due = () => threadDue(h, h.store.threads.get('feishu:oc_1:om_root')!)
+    expect(due()).toBe(true)
+    vi.spyOn(h.commands, 'lark').mockImplementation(async args => args[0] === 'api'
+      ? { items: [{ message_id: 'om_root', chat_id: 'oc_1', thread_id: 'omt_1' }] }
+      : { thread_id: 'omt_1', has_more: false, messages: [] })
+    await pollFeishuThreads(h)
+    // Just read: not due again until the thread poll interval has passed.
+    expect(due()).toBe(false)
+    resetFeishuLoops()
+    // A quiet thread nothing follows keeps its subscription but is skipped, so only a catch-up reads it.
+    h.store.threads.save({ ...h.store.threads.get('feishu:oc_1:om_root')!, lastAt: new Date(Date.now() - 2 * 3600_000).toISOString() })
+    expect(due()).toBe(false)
+    resetFeishuLoops()
+    h.store.tickets.save(openTicket('ticket'))
+    expect(due()).toBe(true)
+    h.store.close()
+  })
+  it('sweeps only the topics that received an event when the round asks for hot ones', async () => {
+    resetFeishuLoops()
+    const h = host()
+    const now = new Date().toISOString()
+    h.store.set('feishu-history-threads:oc_team', { omt_hot: now, omt_cold: now })
+    noteFeishuEvent(feishuTrigger({ message_id: 'om_x', chat_id: 'oc_team', chat_type: 'group', sender_id: MEMBER, sender_type: 'user',
+      content: 'hi', create_time: '1', thread_id: 'omt_hot' }, 'ou_bot', 'cli_bot')!)
+    const scanned: string[] = []
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    vi.spyOn(h.commands, 'lark').mockImplementation(async args => {
+      scanned.push((JSON.parse(args[args.indexOf('--params') + 1]!) as { container_id: string }).container_id)
+      return { has_more: false, items: [] }
+    })
+    await backfillChat(h, 'oc_team', false, new Date(Date.now() - 60_000).toISOString(), now, new AbortController().signal, undefined,
+      { topics: 'hot' })
+    expect(scanned).toEqual(['oc_team', 'omt_hot'])
+    h.store.close()
+  })
+  it('keeps an unaddressed app broadcast out of intake, and takes in one that addresses the bot or comes from a listed bot', async () => {
+    const h = host()
+    const message = (fields: Record<string, unknown>) => historyEvent({ message_id: 'om_app', chat_id: 'oc_team', create_time: '1',
+      sender: { id: 'cli_other', sender_type: 'app' }, body: { content: '{"text":"公告"}' }, ...fields }, 'oc_team', false)
+    const trigger = (fields: Record<string, unknown>) => feishuTrigger(message(fields), 'ou_bot', 'cli_bot')!
+    expect(admitsBackfill(h, trigger({}))).toBe(false)
+    expect(admitsBackfill(h, trigger({ mentions: [{ id: 'ou_bot', name: 'Bot' }] }))).toBe(true)
+    expect(admitsBackfill(h, feishuTrigger(historyEvent({ message_id: 'om_human', chat_id: 'oc_team', create_time: '1',
+      sender: { id: MEMBER, sender_type: 'user' }, body: { content: '{"text":"hi"}' } }, 'oc_team', false), 'ou_bot', 'cli_bot')!)).toBe(true)
+    const settings = h.store.settings()
+    h.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources,
+      feishu: { ...settings.policy.sources.feishu!, bots: [{ id: 'cli_other' }] } } } })
+    expect(admitsBackfill(h, trigger({}))).toBe(true)
+    h.store.close()
+  })
+  it('answers a repeated read from one call within a round, and retries a read that failed', async () => {
+    const h = host()
+    const lark = vi.spyOn(h.commands, 'lark').mockResolvedValue({ ok: true })
+    const cache = feishuCache()
+    const request = ['api', 'GET', '/open-apis/im/v1/messages']
+    await cache.lark(h.commands, request)
+    await cache.lark(h.commands, request)
+    expect(lark).toHaveBeenCalledTimes(1)
+    expect(cache.size).toBe(1)
+    lark.mockRejectedValueOnce(new Error('rate limited'))
+    await expect(cache.lark(h.commands, ['api', 'GET', '/other'])).rejects.toThrow('rate limited')
+    await expect(cache.lark(h.commands, ['api', 'GET', '/other'])).resolves.toEqual({ ok: true })
     h.store.close()
   })
   it('translates a polled topic reply as the event consumer translates the live event', async () => {

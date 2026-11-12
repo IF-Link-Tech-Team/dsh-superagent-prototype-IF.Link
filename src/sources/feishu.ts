@@ -19,7 +19,7 @@ const MembersSchema = z.looseObject({
   has_more: z.boolean(), truncations: z.array(z.unknown()).optional(),
 })
 const FeishuConfigSchema = FeishuBotSchema.extend({
-  readPageSize: z.number().int().min(1).max(50).default(20),
+  readPageSize: z.number().int().min(1).max(50).default(50),
   linkTimeoutMs: z.number().int().min(1).max(90000).default(5000),
   chats: z.array(z.object({ chatId: z.string().regex(/^oc_[a-zA-Z0-9]+$/), name: z.string().trim().max(60).optional(), listen: z.enum(['mentions', 'all']) }).strict())
     .refine(chats => new Set(chats.map(chat => chat.chatId)).size === chats.length, 'Duplicate chat IDs')

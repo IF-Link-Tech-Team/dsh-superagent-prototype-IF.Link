@@ -45,6 +45,8 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     },
     receive: trigger => deps.receive(trigger),
     atomic: work => store.atomic(work),
+    // `policyPart` types its result as the shape every kind shares, so the Feishu-only `bots` list is read here.
+    policyBots: () => (deps.sources.policyPart(kind.kind) as { bots?: { id: string; name?: string }[] } | undefined)?.bots ?? [],
     state: {
       get: name => store.get(name),
       set: (name, value) => { if (value === undefined) store.delete(name); else store.set(name, value) },

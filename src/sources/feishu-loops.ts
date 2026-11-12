@@ -1,12 +1,12 @@
-/** Feishu background loops: live event stream consumer, chat/topic history backfill, chat name refresh, and subscribed thread polling. */
+/** Feishu background loops: live event stream consumer, chat/topic history sweeps, chat name refresh, and subscribed thread polling. */
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { z } from 'zod'
-import { threadKey, type Thread, type Trigger } from '../core/index.ts'
+import { liveTicket, threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
-import { validItems, type Tally } from '../infra/commands.ts'
+import { larkCallStats, validItems, type Commands, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
 import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
   from './feishu-trigger.ts'
@@ -17,6 +17,85 @@ import type { FeishuConfig } from './feishu.ts'
 
 /** Rounds (one per minute) a single chat must fail in a row before `history` turns red. */
 const HISTORY_FAILURE_ROUNDS = 3
+/**
+ * How often the loop wakes up. A round now costs a call or two: the hourly and two-hourly sweeps, not the rounds,
+ * are what read Feishu, so the cadence is cheap and a chat that just received an event is swept within a minute.
+ */
+const ROUND_MS = 60_000
+/** A chat that received an event is swept once, this long afterwards, so an event the stream lost still lands quickly. */
+const FAST_SWEEP_DELAY_MS = 30_000
+const minutes = (value: number): number => value * 60_000
+/** Reads a cadence in minutes from the environment, so an operator can retune a sweep without a rebuild. */
+const envMinutes = (name: string, fallback: number): number => {
+  const value = Number(process.env[name])
+  return Number.isFinite(value) && value > 0 ? minutes(value) : fallback
+}
+/**
+ * Cadences of the background sweeps. Live events deliver almost every message (99% of the human ones, measured over a
+ * week), so the sweeps are a safety net and may be slow: they only have to catch what the stream lost, plus the app
+ * messages Feishu does not push.
+ */
+export const FEISHU_TIMING = {
+  /** Every chat is swept this often for messages the stream lost. */
+  chatSweep: envMinutes('DSH_FEISHU_CHAT_SWEEP_MINUTES', 60),
+  /** A topic that received an event recently is swept on every round. */
+  topicHot: envMinutes('DSH_FEISHU_TOPIC_HOT_MINUTES', 30),
+  /** Every topic is swept this often, hot or not. */
+  topicSweep: envMinutes('DSH_FEISHU_TOPIC_SWEEP_MINUTES', 120),
+  /** A subscribed thread is polled at most this often. */
+  threadPoll: envMinutes('DSH_FEISHU_THREAD_POLL_MINUTES', 10),
+  /** A thread whose last activity is older than this is left to the ticket-driven poll. */
+  threadRecent: envMinutes('DSH_FEISHU_THREAD_RECENT_MINUTES', 60),
+  /** The joined-chat list is a display aid, not a message path. */
+  chatNames: envMinutes('DSH_FEISHU_CHAT_NAMES_MINUTES', 60),
+}
+
+/**
+ * Markers of recent live events, kept in memory: a restart starts cold on purpose, because the first round (and every
+ * reconnect) sweeps everything the markers would otherwise have spared.
+ */
+const activity = { chat: new Map<string, number>(), topic: new Map<string, number>(), thread: new Map<string, number>() }
+/** Set by the first round and by every event-stream restart: the missed window has to be read, not simply skipped. */
+let catchUpRequested = true
+
+/** Forgets the in-memory markers and asks for a full sweep; tests and a restored deployment both use it. */
+export function resetFeishuLoops(): void {
+  activity.chat.clear(); activity.topic.clear(); activity.thread.clear(); catchUpRequested = true
+}
+/** Asks the next round to read every chat, topic, and thread: what the event stream may have missed while it was down. */
+export function requestFeishuCatchUp(): void { catchUpRequested = true }
+/**
+ * Records a live event so the sweeps revisit its chat and topic within a minute. Only the event path calls this: a
+ * message read by a sweep must not mark its own topic hot, or every sweep would keep every topic hot.
+ */
+export function noteFeishuEvent(trigger: Trigger, at = Date.now()): void {
+  const chatId = String(trigger.meta.chatId ?? '')
+  if (chatId) activity.chat.set(chatId, at)
+  const threadId = String(trigger.meta.threadId ?? '')
+  if (threadId) activity.topic.set(threadId, at)
+}
+
+/** One round's memo of Feishu reads, so the chat, topic, and thread sweeps never read the same page twice in a round. */
+export interface FeishuCache {
+  lark<T>(commands: Pick<Commands, 'lark'>, args: string[], cwd?: string): Promise<T>
+  readonly size: number
+}
+export function feishuCache(): FeishuCache {
+  const memo = new Map<string, Promise<unknown>>()
+  return {
+    lark<T>(commands: Pick<Commands, 'lark'>, args: string[], cwd?: string): Promise<T> {
+      const key = [cwd ?? '', ...args].join('\u0000')
+      let pending = memo.get(key) as Promise<T> | undefined
+      if (pending) return pending
+      pending = commands.lark<T>(args, cwd)
+      memo.set(key, pending)
+      // A failed read must not be memoized, or one flaky call would answer for the rest of the round.
+      void pending.catch(() => memo.delete(key))
+      return pending
+    },
+    get size(): number { return memo.size },
+  }
+}
 
 /**
  * Returns an error health once one chat has failed `HISTORY_FAILURE_ROUNDS` rounds in a row, or undefined so a single
@@ -74,6 +153,8 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     catch (error) { if (!running.signal.aborted) ctx.report('feishu', { state: 'error', detail: String(error) }) }
     finally { clearInterval(check); signal.removeEventListener('abort', stop) }
     if (running.signal.aborted) continue
+    // The consumer stopped, so whatever it missed until it is back has to be read rather than assumed delivered.
+    requestFeishuCatchUp()
     retry = consumerRetry(retry, Date.now() - began)
     await delay(retry, undefined, { signal }).catch(() => {})
   }
@@ -90,12 +171,16 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   const stop = (): void => { child.stdin.end(); child.kill('SIGTERM') }
   signal.addEventListener('abort', stop, { once: true })
   const timeout = setTimeout(() => { diagnostic = 'Feishu event consumer did not become ready within 45 seconds'; stop() }, 45_000)
+  // stdout and stderr are separate pipes, so a line read from one may be handled before a line the other wrote earlier:
+  // a late "ready" must not paint over the fault that arrived first.
+  let faulted = false
+  const fault = (detail: string): void => { faulted = true; ctx.report('feishu', { state: 'error', detail }) }
   stderr.on('line', (line: string) => {
     diagnostic = line.slice(0, 4000)
     if (line.startsWith('[event] ready')) {
       ready = true; clearTimeout(timeout)
-      ctx.report('feishu', { state: 'ready', detail: 'Listening for bot events', at: new Date().toISOString() })
-    } else if (/WARN|drop|error/.test(line)) ctx.report('feishu', { state: 'error', detail: diagnostic })
+      if (!faulted) ctx.report('feishu', { state: 'ready', detail: 'Listening for bot events', at: new Date().toISOString() })
+    } else if (/WARN|drop|error/.test(line)) fault(diagnostic)
   })
   stdout.on('line', (line: string) => {
     chain = chain.then(async () => {
@@ -103,11 +188,12 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       const trigger = feishuTrigger(JSON.parse(line), bot(ctx).botId, bot(ctx).appId)
       // Events already read when the Source is disabled are dropped; the consumer stops shortly after.
       if (!trigger || !enabled(ctx)) return
+      noteFeishuEvent(trigger)
       const chats = ctx.state.get(KV.feishu.chats) ?? {}
       chats[String(trigger.meta.chatId)] = trigger.meta.direct === true
       ctx.state.set(KV.feishu.chats, chats)
       await receive(ctx, trigger)
-    }).catch(error => { ctx.report('feishu', { state: 'error', detail: String(error) }) })
+    }).catch(error => fault(String(error)))
   })
   try {
     await new Promise<void>((resolve, reject) => {
@@ -127,7 +213,7 @@ export async function refreshChatNames(ctx: SourceContext, signal?: AbortSignal)
   ctx.state.set(KV.sources.labels(SOURCE), names)
   return names
 }
-/** Rereads the chat list every minute independently of history backfill (whose rounds can take much longer), so newly joined chats appear within a minute. */
+/** Rereads the chat list hourly: its names label chats in the panel, and a new chat shows up within that hour. */
 async function chatNamesLoop(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   if (!available(ctx)) return
@@ -136,9 +222,36 @@ async function chatNamesLoop(ctx: SourceContext, signal: AbortSignal): Promise<v
       try { await refreshChatNames(ctx, signal) }
       catch { /* Names are a display aid; the stored list stays until a later read succeeds. */ }
     }
-    await delay(60_000, undefined, { signal }).catch(() => {})
+    await delay(FEISHU_TIMING.chatNames, undefined, { signal }).catch(() => {})
   }
 }
+
+/** The chats this Source reads: the configured ones plus the direct chats it has already seen, while they are received. */
+function sweepableChats(ctx: SourceContext, config: FeishuConfig): Record<string, boolean> {
+  const seen = ctx.state.get(KV.feishu.chats) ?? {}
+  const known = Object.entries(seen).filter(([, direct]) => direct && config.directMessages)
+  return { ...Object.fromEntries(config.chats.map(chat => [chat.chatId, false])), ...Object.fromEntries(known) }
+}
+/** Forgets markers older than the longest window they still influence, so a long-running process does not accumulate them. */
+function pruneActivity(now: number): void {
+  const stale = now - Math.max(FEISHU_TIMING.topicSweep, FEISHU_TIMING.threadRecent)
+  for (const markers of [activity.chat, activity.topic, activity.thread]) {
+    for (const [key, at] of markers) if (at < stale) markers.delete(key)
+  }
+}
+/** The chats that received an event long enough ago to be swept, and have not been swept since that event. */
+function fastChats(chats: Record<string, boolean>, now: number, swept: Map<string, number>): [string, boolean][] {
+  return Object.entries(chats).flatMap(([chatId, direct]) => {
+    const at = activity.chat.get(chatId)
+    if (at === undefined || now - at < FAST_SWEEP_DELAY_MS || (swept.get(chatId) ?? 0) >= at) return []
+    return [[chatId, direct] as [string, boolean]]
+  })
+}
+/**
+ * Sweeps history in two tiers instead of reading every chat on every round: a chat is swept once shortly after it
+ * receives an event, and every chat is swept hourly as a floor. Everything the event stream delivered is deduplicated
+ * by its deterministic Trigger id, so an overlap costs a call but never a duplicate.
+ */
 async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   if (!available(ctx)) { ctx.report('history', health('paused', 'feishuBotMissing')); return }
@@ -146,87 +259,154 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
   // one flaky round must not turn the whole component red, so only a chat failing HISTORY_FAILURE_ROUNDS rounds
   // in a row is reported. Counters live in memory: a restart is a fresh start, and no stale count survives a night.
   const failures = new Map<string, number>()
+  let lastChatSweep = 0
+  let lastTopicSweep = 0
+  let swept = new Map<string, number>()
+  let reportedCalls = larkCallStats().total
   while (!signal.aborted) {
     const config = enabled(ctx)
     if (!config) {
       ctx.report('history', health('paused', 'sourceOff'))
-      await delay(60_000, undefined, { signal }).catch(() => {})
+      await delay(ROUND_MS, undefined, { signal }).catch(() => {})
       continue
     }
-    const seen = ctx.state.get(KV.feishu.chats) ?? {}
-    const known = Object.entries(seen).filter(([, direct]) => direct && config.directMessages)
-    const chats = { ...Object.fromEntries(config.chats.map(chat => [chat.chatId, false])), ...Object.fromEntries(known) }
+    const now = Date.now()
+    const catchUp = catchUpRequested
+    catchUpRequested = false
+    const chats = sweepableChats(ctx, config)
+    const chatSweep = catchUp || now - lastChatSweep >= FEISHU_TIMING.chatSweep
+    const topicSweep = catchUp || now - lastTopicSweep >= FEISHU_TIMING.topicSweep
+    const cache = feishuCache()
     const errors: string[] = []
     const tally = { skipped: 0 }
-    for (const [chatId, direct] of Object.entries(chats)) {
+    // The full sweep reads every topic anyway, so its chat pass leaves topics alone and the round stays cheap.
+    const mode: TopicMode = topicSweep ? 'none' : 'hot'
+    const targets = chatSweep ? Object.entries(chats) : fastChats(chats, now, swept)
+    for (const [chatId, direct] of targets) {
       if (signal.aborted) break
-      const started = new Date().toISOString()
-      const cursorKey = KV.feishu.history(chatId)
-      const since = ctx.state.get(cursorKey)
-      if (since === undefined) { ctx.state.set(cursorKey, started); continue }
-      try {
-        await backfillChat(ctx, chatId, direct, since, started, signal, tally)
-        if (!signal.aborted) ctx.state.set(cursorKey, cursorAt(started))
-        failures.delete(chatId)
-      } catch (error) {
-        if (signal.aborted) continue
-        failures.set(chatId, (failures.get(chatId) ?? 0) + 1)
-        errors.push(`${chatId}: ${String(error)}`)
+      await sweepChat(ctx, chatId, direct, signal, tally, failures, errors, mode, cache)
+      swept.set(chatId, now)
+    }
+    if (chatSweep) { lastChatSweep = now; swept = new Map() }
+    else pruneActivity(now)
+    if (topicSweep) {
+      lastTopicSweep = now
+      const window = { since: new Date(now - FEISHU_TIMING.topicSweep).toISOString(), until: new Date(now).toISOString() }
+      for (const [chatId, direct] of Object.entries(chats)) {
+        if (signal.aborted) break
+        try { await sweepChatTopics(ctx, chatId, direct, window.since, window.until, signal, tally, 'all', cache) }
+        catch (error) { if (!signal.aborted) errors.push(`${chatId} topics: ${String(error)}`) }
       }
     }
-    await pollThreads(ctx, signal, tally)
+    await pollThreads(ctx, signal, tally, cache)
     for (const chatId of failures.keys()) if (!(chatId in chats)) failures.delete(chatId)
     const skipped = tally.skipped ? `; ${tally.skipped} unreadable messages skipped` : ''
     const retrying = errors.length ? `; ${errors.length} chat(s) failed this round, retrying` : ''
+    // The call count only moves enough to matter on a sweep round, so that is when it is worth reporting.
+    const calls = larkCallStats().total - reportedCalls
+    reportedCalls += calls
+    const read = chatSweep ? `; ${calls} API calls since the last chat sweep` : ''
     if (!signal.aborted) ctx.report('history', historyFailureHealth(failures, errors) ?? {
-      state: 'ready', detail: `Configured groups and known direct chats recovered${skipped}${retrying}`, at: new Date().toISOString() })
-    await delay(60_000, undefined, { signal }).catch(() => {})
+      state: 'ready', detail: `Configured groups and known direct chats recovered${skipped}${retrying}${read}`, at: new Date().toISOString() })
+    await delay(ROUND_MS, undefined, { signal }).catch(() => {})
   }
 }
+
+/** Sweeps one chat between its cursor and now, advancing the cursor only on success so a failed chat is retried. */
+async function sweepChat(ctx: SourceContext, chatId: string, direct: boolean, signal: AbortSignal, tally: Tally,
+  failures: Map<string, number>, errors: string[], topics: TopicMode, cache?: FeishuCache): Promise<void> {
+  const started = new Date().toISOString()
+  const cursorKey = KV.feishu.history(chatId)
+  const since = ctx.state.get(cursorKey)
+  if (since === undefined) { ctx.state.set(cursorKey, started); return }
+  try {
+    await backfillChat(ctx, chatId, direct, since, started, signal, tally, { topics, cache })
+    if (!signal.aborted) ctx.state.set(cursorKey, cursorAt(started))
+    failures.delete(chatId)
+  } catch (error) {
+    if (signal.aborted) return
+    failures.set(chatId, (failures.get(chatId) ?? 0) + 1)
+    errors.push(`${chatId}: ${String(error)}`)
+  }
+}
+
+/** Which topics a sweep reads: every known one, only the recently active ones, or none (a chat-only pass). */
+export type TopicMode = 'all' | 'hot' | 'none'
+/** What a sweep reads and shares with the rest of its round; both are optional so the exported functions stay usable alone. */
+export interface SweepOptions { topics?: TopicMode; cache?: FeishuCache }
+
 /**
  * Backfills chat messages and active topic replies between `since` and `until` before the caller advances the chat cursor.
  * Topics are stored as `{ id: lastSeenAt }`, and unsubscribed topics older than the polling horizon are pruned.
  */
 export async function backfillChat(ctx: SourceContext, chatId: string, direct: boolean, since: string, until: string,
-  signal: AbortSignal, tally: Tally = { skipped: 0 }): Promise<void> {
-  const commands = ctx.commands.withSignal(signal)
-  const topicsKey = KV.feishu.topics(chatId)
-  const topics = { ...ctx.state.get(topicsKey) }
-  const scan = async (kind: 'chat' | 'thread', id: string): Promise<void> => {
-    let page: string | undefined
-    const pages = new Set<string>()
-    do {
-      if (signal.aborted) throw signal.reason
-      const seconds = (time: string) => String(Math.floor(Date.parse(time) / 1000))
-      const parameters = { container_id_type: kind, container_id: id, start_time: seconds(since), end_time: seconds(until),
-        sort_type: 'ByCreateTimeAsc', page_size: 50, ...(page ? { page_token: page } : {}) }
-      const request = ['api', 'GET', '/open-apis/im/v1/messages', '--params', JSON.stringify(parameters)]
-      const result = HistoryPageSchema.parse(await commands.lark(request))
-      for (const message of validItems(HistoricalMessageSchema, result.items, tally)) {
-        const outside = message.chat_id !== chatId || (kind === 'thread' && message.thread_id !== id)
-        if (outside) throw new Error('Feishu history returned a message outside the requested chat or thread')
-        if (message.deleted) continue
-        const at = feishuTime(message.create_time)
-        if (message.thread_id && !(Date.parse(topics[message.thread_id] ?? '') >= Date.parse(at))) topics[message.thread_id] = at
-        const trigger = feishuTrigger(historyEvent(message, chatId, direct), bot(ctx).botId, bot(ctx).appId)
-        if (trigger) await receive(ctx, trigger)
-      }
-      const stuck = result.has_more && (!result.page_token || pages.has(result.page_token))
-      if (stuck) throw new Error('Feishu history pagination did not advance')
-      page = result.has_more ? result.page_token : undefined
-      if (page) pages.add(page)
-    } while (page)
-  }
-  await scan('chat', chatId)
+  signal: AbortSignal, tally: Tally = { skipped: 0 }, options: SweepOptions = {}): Promise<void> {
+  const topics = { ...ctx.state.get(KV.feishu.topics(chatId)) }
+  await scanContainer(ctx, chatId, direct, 'chat', chatId, since, until, signal, tally, topics, options.cache)
   // A quiet topic is forgotten unless a subscribed Thread that is still polled follows it.
   const followed = new Set(ctx.threads.subscribed(SOURCE).filter(thread => polled(ctx, thread))
     .map(thread => String(thread.meta.threadId ?? ctx.triggers.latest(thread.key)?.meta.threadId ?? '')))
   for (const [id, seen] of Object.entries(topics)) {
     if (!followed.has(id) && Date.parse(until) - Date.parse(seen) >= POLL_HORIZON_MS) delete topics[id]
   }
-  ctx.state.set(topicsKey, topics)
-  for (const id of Object.keys(topics)) await scan('thread', id)
-  ctx.state.set(topicsKey, topics)
+  ctx.state.set(KV.feishu.topics(chatId), topics)
+  const mode = options.topics ?? 'all'
+  if (mode !== 'none') await scanTopics(ctx, chatId, direct, topics, since, until, signal, tally, mode, options.cache)
+}
+/** Reads this chat's topics without reading the chat itself: the cold sweep, and the reconnect catch-up's topic half. */
+export async function sweepChatTopics(ctx: SourceContext, chatId: string, direct: boolean, since: string, until: string,
+  signal: AbortSignal, tally: Tally = { skipped: 0 }, mode: TopicMode = 'all', cache?: FeishuCache): Promise<void> {
+  const topics = { ...ctx.state.get(KV.feishu.topics(chatId)) }
+  await scanTopics(ctx, chatId, direct, topics, since, until, signal, tally, mode, cache)
+  ctx.state.set(KV.feishu.topics(chatId), topics)
+}
+/** Reads the chosen topics of one chat; a hot topic is one that received an event within `topicHot`. */
+async function scanTopics(ctx: SourceContext, chatId: string, direct: boolean, topics: Record<string, string>,
+  since: string, until: string, signal: AbortSignal, tally: Tally, mode: TopicMode, cache?: FeishuCache): Promise<void> {
+  const ids = Object.keys(topics)
+  const now = Date.now()
+  const chosen = mode === 'all' ? ids : ids.filter(id => now - (activity.topic.get(id) ?? 0) < FEISHU_TIMING.topicHot)
+  for (const id of chosen) {
+    if (signal.aborted) return
+    await scanContainer(ctx, chatId, direct, 'thread', id, since, until, signal, tally, topics, cache)
+  }
+}
+/**
+ * Whether a message read from history enters intake. Another app's broadcast that names nobody is dropped — it is the
+ * bulk of what history recovers, and the Policy ignores it — while a message that addresses this bot, or comes from a
+ * bot the Policy lists, still enters.
+ */
+export function admitsBackfill(ctx: SourceContext, trigger: Trigger): boolean {
+  if (trigger.human || trigger.addressed || trigger.actor.id === '') return true
+  return ctx.policyBots().some(bot => bot.id === trigger.actor.id)
+}
+async function scanContainer(ctx: SourceContext, chatId: string, direct: boolean, kind: 'chat' | 'thread', id: string,
+  since: string, until: string, signal: AbortSignal, tally: Tally, topics: Record<string, string>, cache?: FeishuCache): Promise<void> {
+  const commands = ctx.commands.withSignal(signal)
+  const lark = <T>(args: string[]): Promise<T> => cache ? cache.lark<T>(commands, args) : commands.lark<T>(args)
+  let page: string | undefined
+  const pages = new Set<string>()
+  do {
+    if (signal.aborted) throw signal.reason
+    const seconds = (time: string) => String(Math.floor(Date.parse(time) / 1000))
+    const parameters = { container_id_type: kind, container_id: id, start_time: seconds(since), end_time: seconds(until),
+      sort_type: 'ByCreateTimeAsc', page_size: 50, ...(page ? { page_token: page } : {}) }
+    const request = ['api', 'GET', '/open-apis/im/v1/messages', '--params', JSON.stringify(parameters)]
+    const result = HistoryPageSchema.parse(await lark(request))
+    for (const message of validItems(HistoricalMessageSchema, result.items, tally)) {
+      const outside = message.chat_id !== chatId || (kind === 'thread' && message.thread_id !== id)
+      if (outside) throw new Error('Feishu history returned a message outside the requested chat or thread')
+      if (message.deleted) continue
+      const at = feishuTime(message.create_time)
+      if (message.thread_id && !(Date.parse(topics[message.thread_id] ?? '') >= Date.parse(at))) topics[message.thread_id] = at
+      const trigger = feishuTrigger(historyEvent(message, chatId, direct), bot(ctx).botId, bot(ctx).appId)
+      if (trigger && admitsBackfill(ctx, trigger)) await receive(ctx, trigger)
+    }
+    const stuck = result.has_more && (!result.page_token || pages.has(result.page_token))
+    if (stuck) throw new Error('Feishu history pagination did not advance')
+    page = result.has_more ? result.page_token : undefined
+    if (page) pages.add(page)
+  } while (page)
 }
 
 /** Resolves the retained source message reference for polling a subscribed thread. */
@@ -238,17 +418,36 @@ export function threadRef(ctx: SourceContext, thread: Thread): FeishuRef | undef
   const trigger = ctx.triggers.latest(thread.key)
   return trigger ? feishuRef(trigger) : undefined
 }
-/** Polls subscribed Feishu threads within the polling horizon so replies missed by the live stream become triggers. */
-export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, tally?: Tally): Promise<void> {
-  await pollEach(ctx, SOURCE, () => !!signal?.aborted, thread => pollThread(ctx, thread, signal, tally))
+/**
+ * Whether a subscribed thread is worth reading this round: a thread a live ticket follows is read at most every
+ * `threadPoll`, and one nothing follows is only read while it saw activity within `threadRecent`. A thread that is quiet
+ * and ticketless keeps its subscription but is left to the reconnect catch-up.
+ */
+export function threadDue(ctx: SourceContext, thread: Thread, now = Date.now()): boolean {
+  if (now - (activity.thread.get(thread.key) ?? 0) < FEISHU_TIMING.threadPoll) return false
+  const followed = thread.subscriptions.some(id => {
+    const ticket = ctx.tickets.get(id)
+    return !!ticket && liveTicket(ticket)
+  })
+  if (followed) return true
+  return now - Date.parse(thread.lastAt ?? thread.createdAt) < FEISHU_TIMING.threadRecent
 }
-async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSignal, tally?: Tally): Promise<void> {
+/** Polls subscribed Feishu threads that are due, so replies missed by the live stream become triggers for their tickets. */
+export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, tally?: Tally, cache?: FeishuCache): Promise<void> {
+  const now = Date.now()
+  await pollEach(ctx, SOURCE, () => !!signal?.aborted, thread => pollThread(ctx, thread, signal, tally, cache),
+    thread => !threadDue(ctx, thread, now))
+}
+async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSignal, tally?: Tally, cache?: FeishuCache): Promise<void> {
   const ref = threadRef(ctx, thread)
   if (!ref) throw new Error('Subscribed thread has no retained source message')
   const config = enabled(ctx)
   // The Source was turned off; the next round polls again.
   if (!config) return
+  activity.thread.set(thread.key, Date.now())
   const commands = ctx.commands.withSignal(signal)
+  // A thread's first page usually repeats a page the topic sweep of the same round already read; share that read.
+  const reader: Pick<Commands, 'lark'> = cache ? { lark: (args, cwd) => cache.lark(commands, args, cwd) } : commands
   const pageSize = config.readPageSize
   const checkpoint = KV.feishu.seen(thread.key)
   const known = new Set(ctx.state.get(checkpoint) ?? [])
@@ -256,7 +455,7 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
   if (!initialized) {
     // Mark root and parent messages as seen on first poll so historical context is not ingested as new triggers.
     for (const section of ['root', 'parent']) {
-      const result = await readFeishu(commands, ref, `feishu/${ref.triggerId}/${section}`, pageSize)
+      const result = await readFeishu(reader, ref, `feishu/${ref.triggerId}/${section}`, pageSize)
       if ('message' in result && result.message) known.add(result.message.message_id)
     }
     ctx.state.set(checkpoint, [...known])
@@ -267,7 +466,7 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
   let resource: string | null = `feishu/${ref.triggerId}/thread`
   while (resource) {
     if (signal?.aborted) return
-    const result = await readFeishu(commands, ref, resource, pageSize, 'desc')
+    const result = await readFeishu(reader, ref, resource, pageSize, 'desc')
     if (!('messages' in result)) throw new Error('Expected Feishu thread messages')
     if (tally && 'skipped' in result) tally.skipped += result.skipped ?? 0
     if ('thread_id' in result && result.thread_id && thread.meta.threadId !== result.thread_id) {

@@ -43,6 +43,8 @@ export interface SourceContext {
   atomic<T>(work: () => T): T
   /** Source-scoped KV records (such as read cursors); setting `undefined` removes an entry. */
   state: { get<V>(key: Key<V>): V | undefined; set<V>(key: Key<V>, value: V | undefined): void; keys<V>(family: Family<V, never>): Key<V>[] }
+  /** The bots the Policy lists for this Source; a non-human Trigger from one of them may still become a candidate. */
+  policyBots(): { id: string; name?: string }[]
   threads: {
     get(key: string): Thread | undefined
     subscribed(source: string): Thread[]

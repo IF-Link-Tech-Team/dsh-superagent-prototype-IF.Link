@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { CliError, Commands, commandError } from '../src/infra/commands.ts'
+import { CliError, Commands, commandError, larkCallStats, resetLarkCallStats } from '../src/infra/commands.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { githubKind } from '../src/sources/github.ts'
@@ -28,6 +28,15 @@ describe('account-isolated operations', () => {
       expect(output).toContain('DSH_SUPERAGENT_PROBE=agent')
       expect(output).not.toContain('GH_TOKEN=')
     } finally { delete process.env.GH_TOKEN }
+  })
+  it('counts the Feishu calls it makes, so a Source can report what its polling costs', async () => {
+    resetLarkCallStats()
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    vi.spyOn(commands, 'run').mockResolvedValue('{"ok":true,"data":{}}')
+    await commands.lark(['im', '+chat-list'])
+    await commands.lark(['im', '+chat-list'])
+    await commands.lark(['api', 'GET', '/open-apis/im/v1/messages'])
+    expect(larkCallStats()).toEqual({ total: 3, byCommand: { 'im +chat-list': 2, 'api GET': 1 } })
   })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
     await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')

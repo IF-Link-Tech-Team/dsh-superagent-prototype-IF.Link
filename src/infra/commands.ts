@@ -40,6 +40,22 @@ function ended(error: unknown): string {
   return typeof code === 'string' ? `could not run: ${code}` : 'failed'
 }
 export interface Tally { skipped: number }
+/**
+ * Process-wide count of Feishu CLI calls, so a Source can report what its own polling costs the tenant's monthly API
+ * quota. The calls that matter are the ones no agent ever sees: the sweeps and the polls.
+ */
+const larkCalls = { total: 0, byCommand: new Map<string, number>() }
+/** How many Feishu CLI calls this process made, in total and per subcommand (`im +chat-list`, `api GET`, ...). */
+export function larkCallStats(): { total: number; byCommand: Record<string, number> } {
+  return { total: larkCalls.total, byCommand: Object.fromEntries(larkCalls.byCommand) }
+}
+/** Forgets the counters, so a test can measure one round. */
+export function resetLarkCallStats(): void { larkCalls.total = 0; larkCalls.byCommand.clear() }
+function countLarkCall(args: readonly string[]): void {
+  larkCalls.total += 1
+  const name = `${args[0] ?? ''} ${args[1] ?? ''}`.trim()
+  larkCalls.byCommand.set(name, (larkCalls.byCommand.get(name) ?? 0) + 1)
+}
 /** Parses array elements against a schema, skipping invalid items and incrementing `tally.skipped`. */
 export function validItems<T>(item: z.ZodType<T>, list: readonly unknown[], tally?: Tally): T[] {
   const items = list.flatMap(value => { const parsed = item.safeParse(value); return parsed.success ? [parsed.data] : [] })
@@ -103,6 +119,7 @@ export class Commands {
   async lark<T>(args: string[], cwd?: string): Promise<T> {
     const bot = this.deployment.feishu
     if (!bot) throw new Error('The Feishu Source has no working bot CLI')
+    countLarkCall(args)
     const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json'], cwd)
       .catch((error: unknown) => { throw membership(error) })
     const result = JSON.parse(output) as { ok: boolean; data: T; error?: { code?: number; message?: string } }
