@@ -2,6 +2,10 @@
 
 > 目标：让 Team Agent 记得住团队的事实、项目的现状和踩过的坑，并在下一次真的用上。
 > 约束：Router 是常驻 Session（实测 99.6% 走缓存）；记忆必须小；写入走唯一脚本闸门，自动落盘、可回滚。
+>
+> **写路径已换代（2026-11-09）**：本文第五、九节描述的"复盘直接改记忆""journal 由独立 profile 定时写"已停用。
+> 现在工单只写草稿（`memory/drafts/inbox/`）与技能，共享记忆由每两天一次的 Dreaming 统一整理。
+> 换代原因与完整设计见同目录的 [memory-architecture-v2.md](memory-architecture-v2.md)；本文的读路径与检索设计仍然有效。
 
 ---
 

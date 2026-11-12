@@ -15,13 +15,16 @@
 
 | 想了解什么 | 读哪篇 |
 |---|---|
+| 整套系统现在是怎么搭起来的（继承了什么、叠了什么） | [team-agent-framework.md](team-agent-framework.md) |
 | 我们要一个什么样的 Agent，需求怎么定的 | [requirements.md](requirements.md) |
 | 从现有原型到目标形态，怎么排步骤、卡在过哪 | [upgrade-plan.md](upgrade-plan.md) |
 | 记忆怎么设计：存什么、谁来写、怎么防止写歪 | [memory-module.md](memory-module.md) |
+| 记忆的写路径后来为什么改成"只有一个写者" | [memory-architecture-v2.md](memory-architecture-v2.md) |
 | 别人的记忆产品怎么做，我们借鉴了什么 | [hermes-memory-research.md](hermes-memory-research.md) |
 | Agent 该在什么情况下说话、什么情况下闭嘴 | [router-prompts.md](router-prompts.md) |
 | 什么请求该转成任务、什么该拒绝 | [policy-rules.md](policy-rules.md) |
 | 模型挂了怎么自动换、备用链怎么在面板里拖 | [model-fallback-plan.md](model-fallback-plan.md) |
+| 飞书 API 额度怎么从 200 万/月压到 12 万/月 | [feishu-quota.md](feishu-quota.md) |
 | 更上游的思考：super-agent 的分层与交互 | [super-agent-design.md](super-agent-design.md) |
 
 ## 三点可能对别人有用的结论
