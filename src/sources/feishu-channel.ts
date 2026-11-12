@@ -27,7 +27,10 @@ export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message:
   const messageId = message.channel.address.messageId
   if (!messageId) throw new Error('Missing Feishu reply target')
   const text = checkedImText(message.text)
-  const reply = ['im', '+messages-reply', '--message-id', messageId, '--markdown', text, '--reply-in-thread', '--idempotency-key', message.id]
+  // `--markdown` reads a value that opens with `@` as a file path, so a reply that starts with a mention is passed one
+  // space later: Feishu renders the leading space away, and the alternative is a message that never leaves the outbox.
+  const markdown = text.startsWith('@') ? ` ${text}` : text
+  const reply = ['im', '+messages-reply', '--message-id', messageId, '--markdown', markdown, '--reply-in-thread', '--idempotency-key', message.id]
   try { await host.commands.lark(reply) }
   catch (error) {
     if (gone(error)) return 'gone'

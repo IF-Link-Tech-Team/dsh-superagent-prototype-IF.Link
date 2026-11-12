@@ -3,6 +3,8 @@ import { Engine, MemoryRepositories, key, type Assessor, type Executor, type Thr
 import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
+import { sendFeishu } from '../src/sources/feishu-channel.ts'
+import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { admitsBackfill, feishuCache, historyFailureHealth, noteFeishuEvent, requestFeishuCatchUp, resetFeishuLoops, runFeishu, threadDue }
   from '../src/sources/feishu-loops.ts'
@@ -208,6 +210,15 @@ describe('feishu source', () => {
       feishu: { ...settings.policy.sources.feishu!, bots: [{ id: 'cli_other' }] } } } })
     expect(admitsBackfill(h, trigger({}))).toBe(true)
     h.store.close()
+  })
+  it('sends a reply that opens with a mention one space later, so the CLI does not read it as a file', async () => {
+    const lark = vi.fn(async (_args: string[]) => ({}))
+    const host = { commands: { lark } } as unknown as Parameters<typeof sendFeishu>[0]
+    await sendFeishu(host, { id: 'om_1-reply', channel: feishuChannel('oc_1', 'om_1'), text: '@飞飞 收到', kind: 'reply' })
+    expect(lark.mock.calls[0]![0]).toEqual(expect.arrayContaining(['--markdown', ' @飞飞 收到']))
+    // A reply that does not open with a mention is passed through untouched.
+    await sendFeishu(host, { id: 'om_2-reply', channel: feishuChannel('oc_1', 'om_2'), text: '收到', kind: 'reply' })
+    expect(lark.mock.calls[1]![0]).toEqual(expect.arrayContaining(['--markdown', '收到']))
   })
   it('answers a repeated read from one call within a round, and retries a read that failed', async () => {
     const h = host()
