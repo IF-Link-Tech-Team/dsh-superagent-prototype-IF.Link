@@ -25,10 +25,13 @@ const ROUND_MS = 60_000
 /** A chat that received an event is swept once, this long afterwards, so an event the stream lost still lands quickly. */
 const FAST_SWEEP_DELAY_MS = 30_000
 const minutes = (value: number): number => value * 60_000
-/** Reads a cadence in minutes from the environment, so an operator can retune a sweep without a rebuild. */
+/**
+ * Reads a cadence in minutes from the environment, so an operator can retune a sweep without a rebuild. Both the
+ * environment value and the fallback are minutes; the callers compare the result against millisecond timestamps.
+ */
 const envMinutes = (name: string, fallback: number): number => {
   const value = Number(process.env[name])
-  return Number.isFinite(value) && value > 0 ? minutes(value) : fallback
+  return minutes(Number.isFinite(value) && value > 0 ? value : fallback)
 }
 /**
  * Cadences of the background sweeps. Live events deliver almost every message (99% of the human ones, measured over a

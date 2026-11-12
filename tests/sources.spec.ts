@@ -6,7 +6,8 @@ import { KV } from '../src/kv.ts'
 import { sendFeishu } from '../src/sources/feishu-channel.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
-import { admitsBackfill, feishuCache, historyFailureHealth, noteFeishuEvent, requestFeishuCatchUp, resetFeishuLoops, runFeishu, threadDue }
+import { admitsBackfill, FEISHU_TIMING, feishuCache, historyFailureHealth, noteFeishuEvent, requestFeishuCatchUp, resetFeishuLoops,
+  runFeishu, threadDue }
   from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
@@ -178,6 +179,12 @@ describe('feishu source', () => {
     expect(due()).toBe(true)
     h.store.close()
   })
+  it('reads every sweep cadence as minutes, so an unset environment cannot turn a round into a tight loop', () => {
+    const minute = 60_000
+    expect(FEISHU_TIMING).toEqual({ chatSweep: 60 * minute, topicHot: 30 * minute, topicSweep: 120 * minute, threadPoll: 10 * minute,
+      threadRecent: 60 * minute, chatNames: 60 * minute })
+    for (const value of Object.values(FEISHU_TIMING)) expect(value).toBeGreaterThanOrEqual(minute)
+  })
   it('sweeps only the topics that received an event when the round asks for hot ones', async () => {
     resetFeishuLoops()
     const h = host()
@@ -323,6 +330,7 @@ describe('feishu source', () => {
     h.store.close()
   })
   it('stops reading a polled topic at the first message it knew, once the topic\'s first poll ran', async () => {
+    resetFeishuLoops()
     const h = host()
     const source = feishuTrigger({ message_id: 'om_root', chat_id: 'oc_1', chat_type: 'group', sender_id: MEMBER, sender_type: 'user',
       content: '@bot fix', create_time: '1', mentions: [{ id: 'ou_bot' }] }, 'ou_bot', 'cli_bot')!
