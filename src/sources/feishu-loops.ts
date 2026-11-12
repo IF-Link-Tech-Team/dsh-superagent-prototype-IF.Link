@@ -43,6 +43,8 @@ export const FEISHU_TIMING = {
   chatSweep: envMinutes('DSH_FEISHU_CHAT_SWEEP_MINUTES', 60),
   /** A topic that received an event recently is swept on every round. */
   topicHot: envMinutes('DSH_FEISHU_TOPIC_HOT_MINUTES', 30),
+  /** Every topic that saw a message this recently is swept by the topic pass; older ones are left to the live stream. */
+  topicRecent: envMinutes('DSH_FEISHU_TOPIC_RECENT_MINUTES', 720),
   /** Every topic is swept this often, hot or not. */
   topicSweep: envMinutes('DSH_FEISHU_TOPIC_SWEEP_MINUTES', 120),
   /** A subscribed thread is polled at most this often. */
@@ -287,7 +289,7 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
     const targets = chatSweep ? Object.entries(chats) : fastChats(chats, now, swept)
     for (const [chatId, direct] of targets) {
       if (signal.aborted) break
-      await sweepChat(ctx, chatId, direct, signal, tally, failures, errors, mode, cache)
+      await sweepChat(ctx, chatId, direct, signal, tally, failures, errors, mode, cache, catchUp)
       swept.set(chatId, now)
     }
     if (chatSweep) { lastChatSweep = now; swept = new Map() }
@@ -297,7 +299,7 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
       const window = { since: new Date(now - FEISHU_TIMING.topicSweep).toISOString(), until: new Date(now).toISOString() }
       for (const [chatId, direct] of Object.entries(chats)) {
         if (signal.aborted) break
-        try { await sweepChatTopics(ctx, chatId, direct, window.since, window.until, signal, tally, 'all', cache) }
+        try { await sweepChatTopics(ctx, chatId, direct, window.since, window.until, signal, tally, 'all', cache, catchUp) }
         catch (error) { if (!signal.aborted) errors.push(`${chatId} topics: ${String(error)}`) }
       }
     }
@@ -317,13 +319,13 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
 
 /** Sweeps one chat between its cursor and now, advancing the cursor only on success so a failed chat is retried. */
 async function sweepChat(ctx: SourceContext, chatId: string, direct: boolean, signal: AbortSignal, tally: Tally,
-  failures: Map<string, number>, errors: string[], topics: TopicMode, cache?: FeishuCache): Promise<void> {
+  failures: Map<string, number>, errors: string[], topics: TopicMode, cache?: FeishuCache, force = false): Promise<void> {
   const started = new Date().toISOString()
   const cursorKey = KV.feishu.history(chatId)
   const since = ctx.state.get(cursorKey)
   if (since === undefined) { ctx.state.set(cursorKey, started); return }
   try {
-    await backfillChat(ctx, chatId, direct, since, started, signal, tally, { topics, cache })
+    await backfillChat(ctx, chatId, direct, since, started, signal, tally, { topics, cache, force })
     if (!signal.aborted) ctx.state.set(cursorKey, cursorAt(started))
     failures.delete(chatId)
   } catch (error) {
@@ -335,8 +337,11 @@ async function sweepChat(ctx: SourceContext, chatId: string, direct: boolean, si
 
 /** Which topics a sweep reads: every known one, only the recently active ones, or none (a chat-only pass). */
 export type TopicMode = 'all' | 'hot' | 'none'
-/** What a sweep reads and shares with the rest of its round; both are optional so the exported functions stay usable alone. */
-export interface SweepOptions { topics?: TopicMode; cache?: FeishuCache }
+/**
+ * What a sweep reads and shares with the rest of its round; both are optional so the exported functions stay usable alone.
+ * `force` reads every topic whatever the recent window says, which is what a reconnect catch-up needs.
+ */
+export interface SweepOptions { topics?: TopicMode; cache?: FeishuCache; force?: boolean }
 
 /**
  * Backfills chat messages and active topic replies between `since` and `until` before the caller advances the chat cursor.
@@ -354,21 +359,34 @@ export async function backfillChat(ctx: SourceContext, chatId: string, direct: b
   }
   ctx.state.set(KV.feishu.topics(chatId), topics)
   const mode = options.topics ?? 'all'
-  if (mode !== 'none') await scanTopics(ctx, chatId, direct, topics, since, until, signal, tally, mode, options.cache)
+  if (mode !== 'none') await scanTopics(ctx, chatId, direct, topics, since, until, signal, tally, mode, options.cache, options.force)
 }
 /** Reads this chat's topics without reading the chat itself: the cold sweep, and the reconnect catch-up's topic half. */
 export async function sweepChatTopics(ctx: SourceContext, chatId: string, direct: boolean, since: string, until: string,
-  signal: AbortSignal, tally: Tally = { skipped: 0 }, mode: TopicMode = 'all', cache?: FeishuCache): Promise<void> {
+  signal: AbortSignal, tally: Tally = { skipped: 0 }, mode: TopicMode = 'all', cache?: FeishuCache, force = false): Promise<void> {
   const topics = { ...ctx.state.get(KV.feishu.topics(chatId)) }
-  await scanTopics(ctx, chatId, direct, topics, since, until, signal, tally, mode, cache)
+  await scanTopics(ctx, chatId, direct, topics, since, until, signal, tally, mode, cache, force)
   ctx.state.set(KV.feishu.topics(chatId), topics)
 }
-/** Reads the chosen topics of one chat; a hot topic is one that received an event within `topicHot`. */
+/**
+ * Whether the topic pass still reads a topic: one that saw a message within `topicRecent`, or one whose stored time is
+ * unreadable. The decision reads the persisted `lastSeenAt`, not the in-memory activity markers, because a restart
+ * empties those and would otherwise skip every topic exactly when the catch-up has the most to recover.
+ */
+const recentTopic = (seen: string | undefined, now: number): boolean => {
+  const at = Date.parse(seen ?? '')
+  return !Number.isFinite(at) || now - at < FEISHU_TIMING.topicRecent
+}
+/**
+ * Reads the chosen topics of one chat; a hot topic is one that received an event within `topicHot`, while the periodic
+ * pass reads the topics that saw a message within `topicRecent` unless `force` asks for all of them.
+ */
 async function scanTopics(ctx: SourceContext, chatId: string, direct: boolean, topics: Record<string, string>,
-  since: string, until: string, signal: AbortSignal, tally: Tally, mode: TopicMode, cache?: FeishuCache): Promise<void> {
+  since: string, until: string, signal: AbortSignal, tally: Tally, mode: TopicMode, cache?: FeishuCache, force = false): Promise<void> {
   const ids = Object.keys(topics)
   const now = Date.now()
-  const chosen = mode === 'all' ? ids : ids.filter(id => now - (activity.topic.get(id) ?? 0) < FEISHU_TIMING.topicHot)
+  const chosen = mode === 'hot' ? ids.filter(id => now - (activity.topic.get(id) ?? 0) < FEISHU_TIMING.topicHot)
+    : mode === 'none' ? [] : ids.filter(id => force || recentTopic(topics[id], now))
   for (const id of chosen) {
     if (signal.aborted) return
     await scanContainer(ctx, chatId, direct, 'thread', id, since, until, signal, tally, topics, cache)

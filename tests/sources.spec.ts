@@ -7,7 +7,7 @@ import { sendFeishu } from '../src/sources/feishu-channel.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { admitsBackfill, FEISHU_TIMING, feishuCache, historyFailureHealth, noteFeishuEvent, requestFeishuCatchUp, resetFeishuLoops,
-  runFeishu, threadDue }
+  runFeishu, sweepChatTopics, threadDue }
   from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
@@ -181,8 +181,8 @@ describe('feishu source', () => {
   })
   it('reads every sweep cadence as minutes, so an unset environment cannot turn a round into a tight loop', () => {
     const minute = 60_000
-    expect(FEISHU_TIMING).toEqual({ chatSweep: 60 * minute, topicHot: 30 * minute, topicSweep: 120 * minute, threadPoll: 10 * minute,
-      threadRecent: 60 * minute, chatNames: 60 * minute })
+    expect(FEISHU_TIMING).toEqual({ chatSweep: 60 * minute, topicHot: 30 * minute, topicRecent: 720 * minute, topicSweep: 120 * minute,
+      threadPoll: 10 * minute, threadRecent: 60 * minute, chatNames: 60 * minute })
     for (const value of Object.values(FEISHU_TIMING)) expect(value).toBeGreaterThanOrEqual(minute)
   })
   it('sweeps only the topics that received an event when the round asks for hot ones', async () => {
@@ -201,6 +201,26 @@ describe('feishu source', () => {
     await backfillChat(h, 'oc_team', false, new Date(Date.now() - 60_000).toISOString(), now, new AbortController().signal, undefined,
       { topics: 'hot' })
     expect(scanned).toEqual(['oc_team', 'omt_hot'])
+    h.store.close()
+  })
+  it('leaves a topic quiet for longer than the recent window alone, and reads it again when a catch-up forces every topic', async () => {
+    resetFeishuLoops()
+    const h = host()
+    const now = Date.now()
+    h.store.set('feishu-history-threads:oc_team', { omt_warm: new Date(now - 3600_000).toISOString(),
+      omt_cold: new Date(now - 13 * 3600_000).toISOString() })
+    const scanned: string[] = []
+    vi.spyOn(h.commands, 'withSignal').mockReturnValue(h.commands)
+    vi.spyOn(h.commands, 'lark').mockImplementation(async args => {
+      scanned.push((JSON.parse(args[args.indexOf('--params') + 1]!) as { container_id: string }).container_id)
+      return { has_more: false, items: [] }
+    })
+    const since = new Date(now - 2 * 3600_000).toISOString(), until = new Date(now).toISOString(), signal = new AbortController().signal
+    await sweepChatTopics(h, 'oc_team', false, since, until, signal, { skipped: 0 }, 'all')
+    expect(scanned).toEqual(['omt_warm'])
+    scanned.length = 0
+    await sweepChatTopics(h, 'oc_team', false, since, until, signal, { skipped: 0 }, 'all', undefined, true)
+    expect(scanned).toEqual(['omt_warm', 'omt_cold'])
     h.store.close()
   })
   it('keeps an unaddressed app broadcast out of intake, and takes in one that addresses the bot or comes from a listed bot', async () => {
@@ -352,7 +372,7 @@ describe('feishu source', () => {
     expect(lark.mock.calls.filter(([args]) => args[1] === '+threads-messages-list')).toHaveLength(1)
     h.store.close()
   })
-  it('recovers the topics of a chat while they had a message in the last two weeks, and forgets quieter ones', async () => {
+  it('keeps a quiet topic\'s record for two weeks, and reads old topics only when a sweep forces every topic', async () => {
     const h = host()
     const day = 24 * 3600_000
     const start = Date.parse('2026-09-01T00:00:00.000Z')
@@ -371,7 +391,9 @@ describe('feishu source', () => {
     for (round = 0; round < 30; round++) {
       scans.length = 0
       const since = new Date(start + round * day - 60_000).toISOString()
-      await backfillChat(h, 'oc_team', false, since, new Date(start + round * day + 60_000).toISOString(), new AbortController().signal)
+      // Forced, so the round reads every kept topic: this case is about retention, not about the recent window.
+      await backfillChat(h, 'oc_team', false, since, new Date(start + round * day + 60_000).toISOString(), new AbortController().signal,
+        undefined, { force: true })
       if (round === 0) expect(scans).toContain('omt_old')
     }
     // The chat, and the topics with a message in the last 14 days.
