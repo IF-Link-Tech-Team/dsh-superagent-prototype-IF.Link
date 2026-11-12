@@ -1,13 +1,15 @@
 # 飞书 API 额度：现状与改造记录
 
-更新：2026-11-12 21:00 · 合并原 `feishu-api-call-map.md` 与 `feishu-quota-plan.md`
+更新：2026-11-12 23:55 · 合并原 `feishu-api-call-map.md` 与 `feishu-quota-plan.md`
 
 ## 一、结论
 
 - 免费版额度 **100 万次/月**（单租户下所有自建应用合计，每月 1 号刷新）。
 - 改造前 **约 6.7 万次/天 ≈ 200 万次/月**，是一个月额度的 2 倍；11 月 12 日已用掉 80–90%。
-- 长连接**不占额度**，且已覆盖 **99.1% 的人类消息**。95% 的调用花在「每分钟全量重扫」上。
-- P1 已把重扫改成事件驱动 + 分级兜底，**预期约 4,000 次/天（12%）**。代码已构建，服务待启动。
+- 长连接**不占额度**，且已覆盖 **99.1% 的人类消息**。改造前 95% 的调用花在「每分钟全量重扫」上。
+- P1 改完后**曾完全没生效**：节奏常量的默认值单位写错，全部退化成毫秒，实测约 9 万次/天，比改造前还高。
+  12 日 23:50 修复后，同一采样法测得的调用量从 140 次/分钟降到空闲时 1 次/分钟，预计 **3,000–4,000 次/天**
+  （其中过半仍是每 2 小时一次的话题兜底）。
 
 ## 二、官方口径（2026-11-12 查证）
 
@@ -32,7 +34,7 @@
 
 一轮 309 次、约 6.6 分钟一轮、217 轮/天。**这些调用换回来的东西，是每天约 4 条人类消息。**
 
-## 四、改造内容（P1，已完成）
+## 四、改造内容（P1）
 
 | 对象 | 改前 | 改后 | 每天 |
 |---|---|---|---|
@@ -52,42 +54,90 @@
 `DSH_FEISHU_TOPIC_SWEEP_MINUTES`(120)、`DSH_FEISHU_THREAD_POLL_MINUTES`(10)、
 `DSH_FEISHU_THREAD_RECENT_MINUTES`(60)、`DSH_FEISHU_CHAT_NAMES_MINUTES`(60)。
 
+### 4.1 上线后一度完全失效（2026-11-12，已修）
+
+```ts
+// 错：只有设了环境变量才乘 60000，没设时把裸数字当毫秒
+const envMinutes = (name, fallback) => {
+  const value = Number(process.env[name])
+  return Number.isFinite(value) && value > 0 ? minutes(value) : fallback
+}
+```
+
+调用处传的 fallback 是 `60 / 30 / 120 / 10 / 60`，而服务进程里**一个 `DSH_FEISHU_*` 都没设**，
+于是 `chatSweep=60ms`、`topicSweep=120ms`、`threadPoll=10ms`：每一轮都判定为"该全量扫了"，
+一轮 370 次调用、约 6 分钟一轮。
+
+为什么没被发现：
+
+- 测试里**没有任何**断言 `FEISHU_TIMING` 的用例，改错默认值不会红。
+- 唯一的验收口径是健康行「N API calls since the last chat sweep」，而那行**每轮都在打**，
+  354、370 这样的数字看着像"一轮的量"，很容易被当成正常。
+- 服务本身是绿的：额度问题不体现在健康检查上。
+
+修复（`7e63f0b`）：fallback 也走 `minutes()`，并补一条断言六个默认节奏的单测。
+
+### 4.2 修复前后实测
+
+采样服务进程的子进程（`/proc/<pid>/task/*/children`），同一种方法前后对比：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 采样 | 838 个 / 6 分钟 = **140/分钟** | 36 个 / 4 分钟；首分钟 33 个是启动补扫尾巴，之后 1/1/1 |
+| 健康行 | 每轮都带 `; 370 API calls since the last chat sweep` | 只在整点那轮出现 |
+
 ## 五、现在什么消息听得到
 
 | 消息 | 结果 | 最坏延迟 |
 |---|---|---|
 | 配置群里人类的话（@ 和不 @） | 全收 | 1 小时 |
-| 话题里的回复 | 全收 | 2 小时 |
-| 别的机器人 @ 我们 | 收（事件 98% 送达），**但判定层一律 ignore** | 2 小时 |
+| 话题里的回复（含冷话题里 @ 我们） | 全收，走长连接 | 实时 |
+| 别的机器人 @ 我们 | 白名单里的收，其余 `not_human` | 2 小时 |
 | 别的机器人普通播报 | 事件推的收，没推的不再补 | 一半丢 |
 | 不在配置表里的群 | 只听 @，无兜底 | 事件丢了就没了 |
 
-判定层：`policy.sources.feishu.bots` 现在是空的，非人类消息一律 `not_human` 拒掉。
-想让某个机器人能唤起我们，把它的 open_id 加进这个名单即可，不用改代码。
+`policy.sources.feishu.bots` 现在有 9 个成员（奶蛋、飞飞、Tickey、yyu、IF.Link运营智囊、w33d + 3 个未解析到名字的），
+应用卡片类机器人（`cli_` 前缀）**故意没加**：它们是纯播报，加了只会制造候选。
+白名单成员的消息最高只能成为 `inferred` 候选，永远不会是显式请求、也不能停单；但在 `auto` 模式下命中规则会**自动建单**，
+所以加同伴 agent 之前要想清楚——等于让另一个 agent 间接驱动我们的 worker。
 
 ## 六、运维
 
 ```bash
 cd ~/TeamAgent/dsh-superagent-prototype-IF.Link
-pnpm build                                  # 已执行
-systemctl --user start dsh-superagent.service
-systemctl --user start teamagent-monitor.timer
+pnpm build
+busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+  org.freedesktop.systemd1.Manager RestartUnit ss dsh-superagent.service replace
 ```
 
-- **验证**：`history` 健康行里的「N API calls since the last chat sweep」每小时应只有几十次；管理后台看斜率。
+- **怎么验额度**：别只看健康行。用子进程采样，空闲时应该 ≈1 次/分钟：
+  ```bash
+  PID=$(ss -ltnp | grep 3082 | grep -oP 'pid=\K[0-9]+' | head -1)
+  # 3 分钟数一遍 lark-cli 的进程数
+  ```
+- **管理 API 的调用姿势**：`/orchestrator/api/*` 要求 loopback + 请求头 `x-orchestrator-request: 1`，
+  拿不到就是 403 `Same-origin management request required`。
+- **改配置后先验组合**：`dsh --profile superagent --dump-config` 会打印合成后的配置树，YAML 写错或字段放错位置当场暴露。
 - **回滚**：`git checkout src tests` 后重新 `pnpm build`。
-- **待办**：设置页把「每页消息数」调到 50（存的是 20，代码默认改了只对新配置生效）。
-- **紧急刹车**：把 `DSH_FEISHU_TOPIC_SWEEP_MINUTES` 设成 1440（一天一次），不用改代码。
+- **紧急刹车**：`DSH_FEISHU_TOPIC_SWEEP_MINUTES=1440`（一天一次），不用改代码。
 
-## 七、否决项
+## 七、下一步（未做）
+
+**跳过冷话题。** 现在库里 125 个话题，24 小时内有活动的只有 18 个、12 小时内有 6 个；按 12 小时口径每轮只读 6 个，
+话题轮询还能再省 95%。两个前提：活跃度必须读持久化的 `lastSeenAt`（内存标记重启即清空），
+且 catch-up 那轮必须强制全扫，否则"重启后补漏"就失效了。
+
+其余小道：设置页「每页消息数」还是 20（代码默认 50 只对新配置生效）。
+
+## 八、否决项
 
 - **砍群**：本意是"代码改完前止血"，但服务已停、P1 一天能上，止血无意义；P1 后剩 12%，砍群只拿覆盖换不需要的余量。
 - **换官方 SDK（P2）**：实测进程启动只要 15ms，0.72 秒是网络往返，换 SDK 只省 2%。且密钥在系统钥匙串读不出、lark-cli 删不掉（worker 和 skill 都依赖）、写路径的 markdown→富文本渲染要重写，影响每条回复。不做。
 
-## 八、依据摘要
+## 九、依据摘要
 
 - 来源归因（3627 条飞书消息，11/05–11/12）：长连接 3468 条、轮询 159 条；**人类消息 99.1% 来自长连接**。
 - 话题内消息 87.8% 由事件送达（491 条里 431 条）。
 - 85 个订阅线程里当时没有任何一张工单在 working（ready 63 / dropped 6 / blocked 3 / failed 2 / 无 2）。
-- 机器人 @ 我们的 85 条消息全部判 `ignore`（白名单为空）；对照人类 @ 我们 129 条，accept 42。
+- 机器人 @ 我们的消息在加白名单之前全部判 `ignore`；对照人类 @ 我们 129 条，accept 42。
 - 应用已勾选 `im:message.group_msg.include_bot:read`，机器人之间的消息理论上都该走事件；实测 11/09 起才开始推送，且仍有一半只从轮询拿到。
