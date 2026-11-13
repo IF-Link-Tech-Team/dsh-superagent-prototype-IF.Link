@@ -44,7 +44,7 @@ describe('clawchat source', () => {
     expect(clawchatTrigger(inbound({ addressed: true })).addressed).toBe('mention')
     expect(clawchatTrigger(inbound()).addressed).toBeUndefined()
     // The Thread is the conversation, so every message in one chat lands on one Thread.
-    expect(clawchatTrigger(inbound()).threads).toEqual([{ source: 'clawchat', id: 'clawchat:cnv_1' }])
+    expect(clawchatTrigger(inbound()).threads).toEqual([{ source: 'clawchat', id: 'cnv_1' }])
     expect(clawchatTrigger(inbound({ replyTo: 'msg-0' })).meta).toMatchObject({ parentId: 'msg-0' })
   })
   it('keys a Trigger by its message id, so a reconnect replay cannot add the same message twice', () => {

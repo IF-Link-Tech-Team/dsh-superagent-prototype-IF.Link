@@ -50,12 +50,15 @@ export const clawchatTriggerId = (messageId: string): string => key('clawchat', 
 /** Builds the Trigger an inbound message becomes: its thread is the conversation, and a direct chat or a mention addresses it. */
 export function clawchatTrigger(inbound: ClawChatInbound): Trigger {
   const direct = inbound.chatType === 'direct'
+  // The Thread id is the conversation alone: `threadKey` prefixes the Source, and a second prefix would show as
+  // `clawchat:clawchat:cnv_…` in every path that names a Thread.
+  const thread = inbound.replyTo ? `${inbound.chatId}:${inbound.replyTo}` : inbound.chatId
   return { id: clawchatTriggerId(inbound.messageId), source: SOURCE,
-    threads: [{ source: SOURCE, id: `${SOURCE}:${inbound.chatId}` }],
+    threads: [{ source: SOURCE, id: thread }],
     actor: { source: SOURCE, id: inbound.senderId }, human: true,
     ...(direct ? { addressed: 'direct' as const } : inbound.addressed ? { addressed: 'mention' as const } : {}),
     at: new Date(inbound.emittedAt).toISOString(), text: inbound.text,
-    channel: { source: SOURCE, thread: `${SOURCE}:${inbound.chatId}`,
+    channel: { source: SOURCE, thread: thread,
       address: { chatId: inbound.chatId, messageId: inbound.messageId, ...(direct ? { direct: 'true' } : {}) } },
     meta: { chatId: inbound.chatId, messageId: inbound.messageId, direct, mentioned: inbound.addressed,
       ...(inbound.replyTo ? { parentId: inbound.replyTo } : {}) } }
@@ -102,6 +105,30 @@ export const clawchatKind: SourceKind<ClawChatConfig> = {
         en: '"Only what addresses me" hands assessments the messages that mention this agent plus direct chats; "All messages" hands over every group message and lets the assessment decide.' } },
   ],
   health: ['clawchat'],
+  policy: {
+    unnamed: { person: { zh: 'ClawChat 用户', en: 'ClawChat user' }, bot: { zh: 'ClawChat Agent', en: 'ClawChat agent' } },
+    schema: z.object({
+      // ClawChat ids are `usr_…`; a trailing-free pattern keeps a pasted id usable without trimming surprises.
+      allowed: z.array(z.object({ id: z.string().regex(/^usr_[a-zA-Z0-9]+$/), name: z.string().trim().max(100).optional() }).strict())
+        .refine(users => new Set(users.map(user => user.id)).size === users.length, 'Duplicate user ids').default([]),
+    }).strict(),
+    fields: [
+      { key: 'allowed', type: 'rows', label: { zh: '能发起工作的用户', en: 'Users who may originate work' },
+        hint: { zh: '配对后把主人加进来；不在名单里的人发消息只会被忽略。', en: 'Add the owner after pairing; a message from anyone else is ignored.' },
+        columns: [{ key: 'id', type: 'text', label: { zh: 'user_id', en: 'user_id' }, pattern: 'usr_[a-zA-Z0-9]+' },
+          { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
+    ],
+    explicit: { zh: '名单内的人私聊这个 Agent，或在下属会话里 @ 它，总是明确的请求。',
+      en: 'Someone on the list who messages the agent directly, or mentions it in a conversation, always makes an explicit request.' },
+    rows() {
+      return [
+        { id: 'direct', label: { zh: '私聊', en: 'Direct messages' }, note: { zh: '接收', en: 'Received' },
+          cells: { listedUnaddressed: false, unlistedAddressed: true, unlistedUnaddressed: false } },
+        { id: 'other', label: { zh: '群聊', en: 'Groups' }, note: { zh: '按接收模式', en: 'Per receive mode' },
+          cells: { listedUnaddressed: false, unlistedAddressed: true, unlistedUnaddressed: false } },
+      ]
+    },
+  },
   scope({ meta }, config) {
     if (meta.direct === true) return { listened: true, observed: false, row: 'direct' }
     return { listened: true, observed: config.replyMode === 'all', row: 'other' }
