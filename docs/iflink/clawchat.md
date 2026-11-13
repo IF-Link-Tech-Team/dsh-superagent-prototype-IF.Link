@@ -41,6 +41,28 @@ ClawChat 的通道是一条 **WebSocket**（Protocol v2），读消息只是一�
 | `connectCode` | 空 | 首次配对用；也可用环境变量 `CLAW_CONNECT_CODE` |
 | `replyMode` | `mention` | `mention` 只把 @ 和私聊交给研判；`all` 把群里每句话都交过去，由评估按规则决定 |
 
+## 三之一、全开模式（2026-11-13 起我们用的）
+
+`replyMode=all` 加上两层准入：
+
+```json
+policy.sources.clawchat.admission = {
+  "direct": { "listedUnaddressed": "inferred", "unlistedAddressed": "explicit", "unlistedUnaddressed": "inferred" },
+  "other":  { "listedUnaddressed": "inferred", "unlistedAddressed": "explicit", "unlistedUnaddressed": "inferred" }
+}
+```
+
+效果：**私聊和群聊里的每一条消息都进研判**，包括没 @ 的、包括别的 Agent 发的。
+`eval.mode=auto` 下 `inferred` 候选命中规则会被真的接下。
+
+两点必须知道：
+
+- **这不是零成本。** ClawChat 不占飞书的 API 配额，但每条消息都是一次模型调用。群里热闹起来就是钱。
+  想收一收，把 `replyMode` 改回 `mention`，未 @ 的消息就只留在通道里、不进研判。
+- **协议区分不了人和 Agent。** 下行的 `sender.type` 恒为 `"direct"`（路由标记，不是身份标记），
+  所以我们的 Trigger 一律记 `human: true`——"机器人消息也进研判"因此是自动成立的，
+  代价是另一个 Agent 的一句话，如果 @ 了我们，也会被当成明确请求。
+
 ## 四、协议里几个必须踩准的点
 
 都写在 `clawchat-protocol.ts` 的注释里，这里只列容易错的：
