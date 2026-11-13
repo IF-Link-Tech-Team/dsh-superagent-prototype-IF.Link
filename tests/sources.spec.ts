@@ -6,8 +6,8 @@ import { KV } from '../src/kv.ts'
 import { sendFeishu } from '../src/sources/feishu-channel.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
-import { admitsBackfill, FEISHU_TIMING, feishuCache, historyFailureHealth, noteFeishuEvent, requestFeishuCatchUp, resetFeishuLoops,
-  runFeishu, sweepChatTopics, threadDue }
+import { admitsBackfill, FEISHU_TIMING, feishuCache, historyFailureHealth, noteFeishuCalls, noteFeishuEvent, requestFeishuCatchUp,
+  resetFeishuLoops, runFeishu, sweepChatTopics, threadDue }
   from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
@@ -17,7 +17,7 @@ import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
-import { Commands, commandError } from '../src/infra/commands.ts'
+import { Commands, commandError, resetLarkCallStats } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
@@ -177,6 +177,20 @@ describe('feishu source', () => {
     resetFeishuLoops()
     h.store.tickets.save(openTicket('ticket'))
     expect(due()).toBe(true)
+    h.store.close()
+  })
+  it('adds each round to the day\'s Feishu call record, so quota use outlives the in-memory counter', () => {
+    resetLarkCallStats()
+    const h = host()
+    const at = new Date('2026-11-13T10:00:00+08:00')
+    expect(noteFeishuCalls(h, 3, at).today).toBe(3)
+    expect(noteFeishuCalls(h, 4, at).today).toBe(7)
+    const record = h.store.get<{ total: number; rounds: number }>('feishu-calls:2026-11-13')!
+    expect(record.total).toBe(7)
+    expect(record.rounds).toBe(2)
+    // A new local day starts a new record rather than adding to yesterday's.
+    expect(noteFeishuCalls(h, 1, new Date('2026-11-14T00:30:00+08:00')).today).toBe(1)
+    expect(h.store.get<{ total: number }>('feishu-calls:2026-11-14')!.total).toBe(1)
     h.store.close()
   })
   it('reads every sweep cadence as minutes, so an unset environment cannot turn a round into a tight loop', () => {

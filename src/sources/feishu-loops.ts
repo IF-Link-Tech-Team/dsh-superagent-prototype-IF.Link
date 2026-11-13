@@ -307,14 +307,37 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
     for (const chatId of failures.keys()) if (!(chatId in chats)) failures.delete(chatId)
     const skipped = tally.skipped ? `; ${tally.skipped} unreadable messages skipped` : ''
     const retrying = errors.length ? `; ${errors.length} chat(s) failed this round, retrying` : ''
-    // The call count only moves enough to matter on a sweep round, so that is when it is worth reporting.
     const calls = larkCallStats().total - reportedCalls
     reportedCalls += calls
-    const read = chatSweep ? `; ${calls} API calls since the last chat sweep` : ''
+    // Every round is accounted, not only a sweep round: the daily record is what quota decisions are read from later.
+    const { today } = signal.aborted ? { today: 0 } : noteFeishuCalls(ctx, calls)
+    const read = calls ? `; ${calls} API calls this round, ${today} today` : `; ${today} API calls today`
     if (!signal.aborted) ctx.report('history', historyFailureHealth(failures, errors) ?? {
       state: 'ready', detail: `Configured groups and known direct chats recovered${skipped}${retrying}${read}`, at: new Date().toISOString() })
     await delay(ROUND_MS, undefined, { signal }).catch(() => {})
   }
+}
+
+/** The local calendar day (`YYYY-MM-DD`) a call is counted under, so an operator reads it in their own time zone. */
+export function callDay(at: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`
+}
+/**
+ * Adds one round's Feishu calls to today's record and logs the rounds that actually called. The in-memory counter dies
+ * with the process, so the daily record is the only way to read quota use back afterwards; an idle round writes nothing
+ * but its increment, which keeps both the store and the log sparse.
+ */
+export function noteFeishuCalls(ctx: SourceContext, calls: number, at = new Date()): { today: number } {
+  const key = KV.feishu.calls(callDay(at))
+  const current = ctx.state.get(key) ?? { total: 0, rounds: 0, byCommand: {} }
+  const byCommand = { ...current.byCommand }
+  // The per-round split is not kept in memory, so only the total is exact; the split comes from the process counter.
+  for (const [name, count] of Object.entries(larkCallStats().byCommand)) byCommand[name] = Math.max(byCommand[name] ?? 0, count)
+  const next = { total: current.total + calls, rounds: current.rounds + 1, byCommand }
+  ctx.state.set(key, next)
+  console.log(`[feishu] round ${next.rounds}: ${calls} API call(s), ${next.total} today (${callDay(at)})`)
+  return { today: next.total }
 }
 
 /** Sweeps one chat between its cursor and now, advancing the cursor only on success so a failed chat is retried. */

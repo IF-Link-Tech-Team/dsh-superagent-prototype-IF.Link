@@ -56,6 +56,8 @@ export const KV = {
   gestures: { pace: family<{ at: string; count: number }, [chat: string]>('gesture-pace:'),
     person: family<string, [person: string]>('gesture-person:') },
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
+    /** Feishu CLI calls per local day (`YYYY-MM-DD`), by subcommand, so quota use can be read back after a restart. */
+    calls: family<{ total: number; rounds: number; byCommand: Record<string, number> }, [day: string]>('feishu-calls:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
 }
