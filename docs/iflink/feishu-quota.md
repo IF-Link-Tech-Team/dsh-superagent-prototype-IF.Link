@@ -9,7 +9,7 @@
 - 长连接**不占额度**，且已覆盖 **99.1% 的人类消息**。改造前 95% 的调用花在「每分钟全量重扫」上。
 - P1 改完后**曾完全没生效**：节奏常量的默认值单位写错，全部退化成毫秒，实测约 9 万次/天，比改造前还高。
   12 日 23:50 修复后，同一采样法测得的调用量从 140 次/分钟降到空闲时 1 次/分钟；再加 13 日 0:05 的冷话题
-  跳过，预计 **约 2,000 次/天**。
+  跳过，约 2,000 次/天。13 日上午把兜底扫描放到一天一次，**约 1,050 次/天**。
 
 ## 二、官方口径（2026-11-12 查证）
 
@@ -53,6 +53,10 @@
 可调参数（环境变量，分钟）：`DSH_FEISHU_CHAT_SWEEP_MINUTES`(60)、`DSH_FEISHU_TOPIC_HOT_MINUTES`(30)、
 `DSH_FEISHU_TOPIC_RECENT_MINUTES`(720)、`DSH_FEISHU_TOPIC_SWEEP_MINUTES`(120)、`DSH_FEISHU_THREAD_POLL_MINUTES`(10)、
 `DSH_FEISHU_THREAD_RECENT_MINUTES`(60)、`DSH_FEISHU_CHAT_NAMES_MINUTES`(60)。
+
+**线上的值（2026-11-13 起，写在 systemd unit 的 `Environment=` 里）**：`CHAT_SWEEP=1440`、`TOPIC_SWEEP=1440`、
+`THREAD_POLL=30`——也就是把三道兜底全放到最慢。前提是长连接覆盖 99.1%，兜底只防"看着连着但事件没到"的静默丢失；
+代价是最坏情况 24 小时才发现。断线重连那一轮仍然强制全扫，不受这三个值影响。
 
 ### 4.1 上线后一度完全失效（2026-11-12，已修）
 
@@ -133,7 +137,8 @@ busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
   拿不到就是 403 `Same-origin management request required`。
 - **改配置后先验组合**：`dsh --profile superagent --dump-config` 会打印合成后的配置树，YAML 写错或字段放错位置当场暴露。
 - **回滚**：`git checkout src tests` 后重新 `pnpm build`。
-- **紧急刹车**：`DSH_FEISHU_TOPIC_SWEEP_MINUTES=1440`（一天一次），不用改代码。
+- **调额度**：三个节奏都在 systemd unit 的 `Environment=` 里，改完 `Reload` + 重启；现在的值是一天一次，
+  额度紧张时可以再停掉兜底（设成 100000），完全靠长连接和"重连补扫"。
 
 ## 七、下一步（未做）
 
