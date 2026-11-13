@@ -27,6 +27,7 @@
 | 飞书 API 额度怎么压下来，以及一次"改了但没生效"的教训 | [feishu-quota.md](feishu-quota.md) |
 | 模型 token 花在哪、为什么 router 一条会话吃掉 65% | [model-token-cost.md](model-token-cost.md) |
 | 给团队里其他 Agent 的省额度清单（不分框架） | [agent-quota-guide.md](agent-quota-guide.md) |
+| 想聊天又不想烧 API 额度：Agent 原生的 ClawChat 通道 | [clawchat.md](clawchat.md) |
 | 怎么让它不只在被叫到时才在（心跳、定时任务、主动开口） | [heartbeat-scheduler.md](heartbeat-scheduler.md) |
 | 更上游的思考：super-agent 的分层与交互 | [super-agent-design.md](super-agent-design.md) |
 
