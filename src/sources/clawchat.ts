@@ -198,7 +198,12 @@ async function runClawChat(ctx: SourceContext, signal: AbortSignal): Promise<voi
   }, REFRESH_CHECK_MS)
   timer.unref?.()
   try { await connection.run(signal) }
-  finally { clearInterval(timer); connection.stop(); live = undefined }
+  finally {
+    clearInterval(timer); connection.stop(); live = undefined
+    // The loop ends when the Source is switched off or the plugin unloads; leaving the last "ready" detail behind
+    // would claim a connection that no longer exists.
+    if (signal.aborted) ctx.report('clawchat', { state: 'paused', detail: 'Off' })
+  }
 }
 
 export const name = 'dsh-superagent-clawchat'
