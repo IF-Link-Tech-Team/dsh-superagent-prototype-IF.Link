@@ -63,15 +63,25 @@ policy.sources.clawchat.admission = {
   所以我们的 Trigger 一律记 `human: true`——"机器人消息也进研判"因此是自动成立的，
   代价是另一个 Agent 的一句话，如果 @ 了我们，也会被当成明确请求。
 
-通道全开还不够：第一批群消息进了研判，但模型自己判成"开场介绍语，没有请求、决定或待办，无需介入"。
-原因是整套提示词是照着"交付型 Agent"写的——`dispatch` 里明写 ignore 用于「ordinary discussion」，
-`communication` 里反复强调"没有可交付的东西就不发消息"。
+通道全开还不够。第一批群消息确实进了研判，但模型自己判成「开场介绍语，没有请求、决定或待办，无需介入」。
 
-要它真的聊起来，得给提示词加一段明确的授权。2026-11-13 在团队提示词的 `communication` 末尾加了
-「Conversational channels (ClawChat)」一节：在 ClawChat 里，招呼、道谢、接梗、闲聊都用
-`orchestrator_reply purpose=answer` 回一句，然后把 Trigger 判成 ignore（理由写回了什么）；
-不开工单、不写进展报告、一条消息最多回一次；并明写**不要带到飞书和 GitHub**上去。
-这段在面板的「提示词」里能改也能回滚。
+**根因不在提示词，在漏斗。** 候选卡片上由系统写定 `next_action`（`src/app/links.ts:69`）：
+
+- `strength=explicit`（被 @ 或私聊）→「Route it with orchestrator_route as dispatch says」，可以直接 accept 建单；
+- `strength=inferred`（没 @）→「Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess…」。
+
+而准入表里 `listedUnaddressed` / `unlistedUnaddressed` 两格**只允许 inferred 或 ignore**，没有 explicit
+（`src/admission.ts:9`）——没点名的消息在设计上就不可能成为明确请求。于是推断候选**只能靠命中一条启用的规则
+才能动作**，而我们的规则全是工作型的（历史查询、决策记录、无人认领、核对请求、跨群同步、进展汇总），
+一句「大家好」对不上任何一条，忽略是正确行为。三次群问候都是 `orchestrator_route` 直接 ignore，
+理由码 `ignoredFromCard`（未经规则研判）。
+
+2026-11-13 试过在团队提示词里加一段「Conversational channels (ClawChat)」授权它直接回话，
+确认注入到了主会话的 system prompt，但它仍然选择忽略——卡片上那句具体的 `next_action` 压过了通用段落。
+**已回滚**：这个 Agent 的定位是偏工作的，不做闲聊。
+
+真要让它聊，只有两条路：加一条能命中闲聊的规则（命中就建单，重），或者给引擎加一种「不建单、直接回一句」
+的决议类型（干净，但要动 core）。
 
 ## 四、协议里几个必须踩准的点
 
