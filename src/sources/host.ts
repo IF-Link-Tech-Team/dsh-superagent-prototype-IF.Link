@@ -25,6 +25,12 @@ export interface SourceHost {
   /** Returns the context for one Source kind; its `report` writes only the health entries declared by the kind. */
   context(kind: { kind: string; health: readonly string[] }): SourceContext
 }
+/**
+ * When the domain last moved, in process memory: `lastEventAt` for any domain event and `lastHumanAt` for a person's
+ * message. A Source that must decide whether a model call is worth it reads this instead of polling the Store.
+ */
+export interface Activity { lastEventAt?: number | undefined; lastHumanAt?: number | undefined; humanTriggers?: number | undefined }
+
 /** Display label, URL, and facts (`null` removes a fact) that a Source publishes on a Thread. */
 export interface ThreadDescription { label?: string; url?: string; facts?: Record<string, ThreadFact | null> }
 /** Application capabilities exposed to a Source kind for reading state, ingesting triggers, managing threads/tickets, and reporting health. */
@@ -52,10 +58,14 @@ export interface SourceContext {
     /** Sets or removes (`undefined`) keys in a Thread's `meta` after rereading it; a missing Thread is left alone. */
     patch(key: string, meta: Record<string, unknown>): void
   }
+  /** Movement in the domain since this process started, for a Source that schedules its own work. */
+  activity(): Activity
   tickets: {
     get(id: string): Ticket | undefined
     /** Open tickets, newest first. */
     open(): Ticket[]
+    /** Every ticket, newest first, so a Source can report what ended in a window. */
+    list(): Ticket[]
     /** Binds an open ticket to follow a Source Thread (`own` when opened by the ticket) so the Thread's close, not a ready report, ends the ticket. */
     bindThread(id: string, thread: ThreadRef, own: boolean): void
     /** Reports that a followed Thread closed at `at`; each open ticket following it ends once no `own` Thread remains open and no resumed work is still running. */

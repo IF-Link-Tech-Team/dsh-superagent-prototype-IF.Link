@@ -49,6 +49,16 @@ const larkCalls = { total: 0, byCommand: new Map<string, number>() }
 export function larkCallStats(): { total: number; byCommand: Record<string, number> } {
   return { total: larkCalls.total, byCommand: Object.fromEntries(larkCalls.byCommand) }
 }
+/**
+ * The Feishu calls made since the last take, in total and per subcommand, forgetting them so the next round counts
+ * from zero. A round reports exactly its own calls: a process counter read twice and subtracted would drift across a
+ * restart, and taking the larger of two splits is not a sum.
+ */
+export function takeLarkCalls(): { total: number; byCommand: Record<string, number> } {
+  const taken = larkCallStats()
+  resetLarkCallStats()
+  return taken
+}
 /** Forgets the counters, so a test can measure one round. */
 export function resetLarkCallStats(): void { larkCalls.total = 0; larkCalls.byCommand.clear() }
 function countLarkCall(args: readonly string[]): void {

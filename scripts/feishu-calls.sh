@@ -76,6 +76,12 @@ if names:
     for name in sorted(totals, key=lambda item: -totals[item]):
         share = totals[name] / grand * 100 if grand else 0
         print(f"{name:<{width}}{totals[name]:>8}{share:>7.1f}%")
+    # Before 2026-11-13 a round stored the largest process counter instead of adding its own split, so those records'
+    # parts do not sum to their totals. Say so rather than letting a reader read the shares as the whole day's spend.
+    split = sum(totals.values())
+    if grand and split < grand * 0.95:
+        print(f"（注意：这些记录的分项合计只有 {split} 次，少于总数 {grand} 次——"
+              "2026-11-13 之前的分项按进程计数器取最大值写入，重启后会丢；此后的记录才逐轮累加。）")
 
 # 每月额度是 100 万次；预测只按已经过完的日子，今天还没跑完。
 done = [record for record in records if record['day'] != today]

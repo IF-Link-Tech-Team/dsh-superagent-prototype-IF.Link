@@ -15,6 +15,14 @@ The Source records whether a message addresses the agent: `mention` for a mentio
 - Other human messages use the admission table for their receiving scope.
 - A bot on the Source's bot list can produce an inferred candidate, never an explicit request. Other bots are not admitted.
 
+### A quiet window for unaddressed messages
+
+A person often types one thought across several short messages. An Eval therefore waits a configured number of seconds
+(`eval.quietSeconds`, off by default) before it starts on a Thread whose newest Trigger is a person's unaddressed message,
+so the bubbles carrying one meaning are judged together. Anything that speaks for itself starts at once: a Trigger that
+addresses the agent, a bot's message, a CI result, and a queue that has reached five Triggers. The wait changes when an
+Eval starts, never what it may accept.
+
 ### Subscriptions: continuing existing work
 
 Every message on a subscribed Thread reaches its subscribed Tickets as context, including messages from bots and CI. This delivery bypasses the gate and grants no new authority. Each Ticket remains limited by its Mandate.

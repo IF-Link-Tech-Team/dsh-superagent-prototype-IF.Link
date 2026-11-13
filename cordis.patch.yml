@@ -12,6 +12,9 @@
       disabled: true
     # Optional ClawChat Source: a long connection, so reading a message spends no API quota; enable it and paste the
     # owner's pairing code in the panel.
+    # Scheduler Source: turns the local clock into Triggers. No platform API, no credentials.
+    - id: dsh-superagent-scheduler
+      name: dsh-superagent/scheduler-watch
     - id: dsh-superagent-clawchat
       name: dsh-superagent/clawchat-watch
       disabled: true

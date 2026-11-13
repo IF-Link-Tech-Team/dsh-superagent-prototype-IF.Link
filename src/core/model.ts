@@ -8,6 +8,9 @@ export interface ThreadRef { source: string; id: string }
 /** Write-only address on a thread; the address format belongs to the source. */
 export interface ChannelRef { source: string; thread: string; address: Record<string, string> }
 
+/** How many unaddressed messages may merge into one Eval before the quiet window closes early. */
+export const QUIET_BATCH = 5
+
 /** Stable key of a thread across the whole domain. */
 export const threadKey = (ref: ThreadRef): string => `${ref.source}:${ref.id}`
 /**

@@ -15,6 +15,8 @@ export interface SourceScope {
 
 /** Versioned rules; `gate` decides who may originate work. Source scope is not part of Policy. */
 export interface Policy {
+  /** How long an unaddressed human Trigger waits for company before its Eval starts; absent or 0 starts at once. */
+  readonly quietMs?: number
   version: string
   paused: boolean
   gate(trigger: Trigger, thread: Thread, tickets: Ticket[]): GateResult

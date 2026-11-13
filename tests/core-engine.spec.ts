@@ -1709,3 +1709,95 @@ describe('marks on the message a ticket took up', () => {
     expect(h.outbox.map(item => [item.kind, item.reaction ?? null]).slice(2)).toEqual([['reply', null]])
   })
 })
+
+// A Source such as the scheduler confines its own candidates to the rules it names, so time-driven work can never be
+// accepted as an unclaimed request or a history lookup (docs/iflink/heartbeat-scheduler.md 5.6).
+describe('allowRules', () => {
+  const scheduled = (id: string, allowRules?: string[]) => trigger(id, { human: false, actor: { source: 'chat', id: '' },
+    meta: allowRules ? { allowRules } : {} })
+  const inferred = () => harness({ gate: () => ({ admissible: true, strength: 'inferred', basis: { via: 'admission', cell: 'unlistedUnaddressed' } }) })
+
+  it('refuses an accept that matched a rule outside the Source list', () => {
+    const h = inferred()
+    h.engine.receive(scheduled('1', ['periodic-check'])); h.pump()
+    expect(() => h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Daily', scope: 's', reason: 'r', rules: ['unclaimed-request'] }))
+      .toThrow(UserError)
+  })
+
+  it('accepts a rule inside the Source list', () => {
+    const h = inferred()
+    h.engine.receive(scheduled('1', ['periodic-check'])); h.pump()
+    const decision = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Daily', scope: 's', reason: 'r', rules: ['periodic-check'] })
+    expect(decision.kind).toBe('accept')
+  })
+
+  it('leaves a candidate that names no list open to every rule', () => {
+    const h = inferred()
+    h.engine.receive(scheduled('1')); h.pump()
+    const decision = h.decide(h.requests.at(-1)!, { kind: 'accept', title: 'Daily', scope: 's', reason: 'r', rules: ['unclaimed-request'] })
+    expect(decision.kind).toBe('accept')
+  })
+
+  it('reads the list from the eval\'s primary trigger, so a batch member cannot slip past it', () => {
+    const h = inferred()
+    h.engine.receive(scheduled('1', ['periodic-check'])); h.pump()
+    const candidate = h.requests.at(-1)!
+    // A direct decision on a second, list-free trigger of the same thread would otherwise open every rule.
+    h.engine.receive(trigger('9', { human: false, actor: { source: 'chat', id: '' }, meta: {} }))
+    expect(() => h.decide(candidate, { kind: 'accept', title: 'Daily', scope: 's', reason: 'r', rules: ['unclaimed-request'] })).toThrow(UserError)
+  })
+})
+
+// The quiet window: several bubbles carrying one thought are judged together, while anything that speaks for itself
+// starts at once (see the `quietSeconds` measurement in docs/iflink/heartbeat-scheduler.md).
+describe('quiet window', () => {
+  it('holds an unaddressed message until the window closes', () => {
+    const h = harness({ quietMs: 60_000 })
+    h.engine.receive(trigger('1'))
+    h.pump()
+    expect(h.requests).toHaveLength(0)
+    h.tick(61)
+    h.pump()
+    expect(h.requests).toHaveLength(1)
+  })
+
+  it('starts at once for a request that addresses the agent', () => {
+    const h = harness({ quietMs: 60_000 })
+    h.engine.receive(trigger('1', { addressed: 'mention' }))
+    h.pump()
+    expect(h.requests).toHaveLength(1)
+  })
+
+  it('starts at once for a bot or a CI result, which is not chatter', () => {
+    const h = harness({ quietMs: 60_000, gate: () => ({ admissible: true, strength: 'inferred', basis: { via: 'admission', cell: 'unlistedUnaddressed' } }) })
+    h.engine.receive(trigger('1', { human: false, actor: { source: 'chat', id: '' } }))
+    h.pump()
+    expect(h.requests).toHaveLength(1)
+  })
+
+  it('keeps merging until the batch limit, then starts early', () => {
+    const h = harness({ quietMs: 60_000 })
+    for (const id of ['1', '2', '3', '4']) { h.engine.receive(trigger(id)); h.pump() }
+    expect(h.requests).toHaveLength(0)
+    h.engine.receive(trigger('5'))
+    h.pump()
+    expect(h.requests).toHaveLength(1)
+    expect(h.requests[0]!.triggers).toHaveLength(5)
+  })
+
+  it('merges the bubbles that arrive inside the window into one Eval', () => {
+    const h = harness({ quietMs: 60_000 })
+    h.engine.receive(trigger('1')); h.pump(); h.tick(10)
+    h.engine.receive(trigger('2')); h.pump(); h.tick(10)
+    expect(h.requests).toHaveLength(0)
+    h.tick(61); h.pump()
+    expect(h.requests).toHaveLength(1)
+    expect(h.requests[0]!.triggers.map(item => item.id).sort()).toEqual(['1', '2'])
+  })
+
+  it('waits for nobody when the window is off', () => {
+    const h = harness({ quietMs: 0 })
+    h.engine.receive(trigger('1')); h.pump()
+    expect(h.requests).toHaveLength(1)
+  })
+})

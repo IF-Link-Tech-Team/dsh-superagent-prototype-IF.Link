@@ -1,7 +1,7 @@
 /** Evals: the Thread-level assessments of queued Triggers, and the Decisions they end with. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { liveTicket, threadKey } from './model.ts'
+import { liveTicket, QUIET_BATCH, threadKey } from './model.ts'
 import type { Decision, DecisionKind, Evaluation, Gesture, Mandate, MandateBasis, Strength, Thread, Trigger } from './model.ts'
 import type { AssessmentOutcome, Candidate, Policy } from './ports.ts'
 import { said, type Reason } from './reasons.ts'
@@ -67,6 +67,22 @@ export class Evals extends EnginePart {
     thread.pending = [...triggerIds, ...thread.pending.filter(item => !triggerIds.includes(item))]
     this.repo.threads.save(thread)
     this.options.assessor.release?.(id)
+  }
+  /**
+   * Whether a Thread's queued Triggers should keep waiting for company instead of starting an Eval now.
+   * Only a person's unaddressed message waits: a request that addresses the agent, a bot's message and a CI result all
+   * speak for themselves, and a queue that reaches the batch limit starts early so one judgement never spans a whole
+   * conversation. See `docs/iflink/heartbeat-scheduler.md` and the measurement in the `quietSeconds` setting.
+   */
+  waits(thread: Thread, policy: Policy): boolean {
+    const quiet = policy.quietMs ?? 0
+    if (quiet <= 0) return false
+    if (thread.pending.length >= QUIET_BATCH) return false
+    const waiting = thread.pending.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
+    if (waiting.some(trigger => trigger.addressed !== undefined || !trigger.human)) return false
+    const newest = Date.parse(thread.lastAt ?? '')
+    // An unreadable or missing timestamp starts at once: holding work back on a parse failure would be worse than a merge lost.
+    return Number.isFinite(newest) && Date.parse(this.now()) - newest < quiet
   }
   /** Start one Eval of the Triggers queued on a Thread, judged by the gate, and ask the assessor for it. */
   start(threadKeyValue: string, policy: Policy): void {
@@ -152,6 +168,14 @@ export class Evals extends EnginePart {
     // An inferred candidate is accepted only on enabled rules its assessment matched, while assessments may accept.
     if (outcome.kind === 'accept' && evaluation.strength !== 'explicit' && !this.policy().admitsInferred(outcome.rules ?? [])) {
       throw new UserError('notExplicit')
+    }
+    // A Source may confine its own candidates to named rules, so a scheduled Trigger cannot be accepted as unclaimed
+    // work or a history lookup. Read from the Eval's primary Trigger, since a batch can carry several.
+    if (outcome.kind === 'accept') {
+      const allowed = this.allowedRules(evaluation.primary ?? trigger.id)
+      if (allowed && !(outcome.rules ?? []).every(id => allowed.includes(id))) {
+        throw new UserError('ruleNotAllowed', { rules: allowed.join(', ') })
+      }
     }
     return this.decideEval(thread, evaluation, outcome)
   }
@@ -269,6 +293,11 @@ export class Evals extends EnginePart {
    * ticket. It is decided at once, beside an Eval its Thread may have in progress, and takes the Trigger out of the queue.
    * Its id names the outcome's kind, so a stop and an accept of one message at the same moment are two Decisions.
    */
+  /** The rules a Source lets its own Trigger be accepted under, from `meta.allowRules`; undefined leaves every rule open. */
+  private allowedRules(triggerId: string): string[] | undefined {
+    const value = this.repo.triggers.get(triggerId)?.meta.allowRules
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : undefined
+  }
   private directEval(thread: Thread, trigger: Trigger, kind: AssessmentOutcome['kind'], ticketId?: string): Evaluation {
     const policy = this.policy()
     const gate = policy.gate(trigger, thread, this.ticketsOnThread(thread))

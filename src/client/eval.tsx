@@ -192,8 +192,8 @@ function PolicyBlock() {
 function EvalBlock() {
   const { t } = usePanel()
   const block = useSettings().settings.blocks.eval
-  const saved = { ...block.value, timeoutSeconds: String(block.value.timeoutSeconds) }
-  const draft = useBlockDraft('eval', saved, block.revision, value => ({ ...value, timeoutSeconds: numberOf(value.timeoutSeconds) }))
+  const saved = { ...block.value, timeoutSeconds: String(block.value.timeoutSeconds), quietSeconds: String(block.value.quietSeconds) }
+  const draft = useBlockDraft('eval', saved, block.revision, value => ({ ...value, quietSeconds: numberOf(value.quietSeconds), timeoutSeconds: numberOf(value.timeoutSeconds) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
   return <form className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }}>
@@ -204,6 +204,10 @@ function EvalBlock() {
           options={(['off', 'observe', 'auto'] as const).map(mode => ({ value: mode, label: valueLabel(t, 'mode', mode),
             title: t(`modeOption.${mode}`) }))} />
       </Section>
+      <Field label={t('evalQuiet')} hint={t('evalQuietHint')}>
+        <Input type="number" min={LIMITS.quietSeconds.min} max={LIMITS.quietSeconds.max} required value={value.quietSeconds}
+          onChange={event => edit({ quietSeconds: event.target.value })} />
+      </Field>
       <Field label={t('evalTimeout')} hint={t('evalTimeoutHint')}>
         <Input type="number" min={LIMITS.evalTimeoutSeconds.min} max={LIMITS.evalTimeoutSeconds.max} required value={value.timeoutSeconds}
           onChange={event => edit({ timeoutSeconds: event.target.value })} />

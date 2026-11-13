@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { CliError, Commands, commandError, larkCallStats, resetLarkCallStats } from '../src/infra/commands.ts'
+import { CliError, Commands, commandError, larkCallStats, resetLarkCallStats, takeLarkCalls } from '../src/infra/commands.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { githubKind } from '../src/sources/github.ts'
@@ -37,6 +37,17 @@ describe('account-isolated operations', () => {
     await commands.lark(['im', '+chat-list'])
     await commands.lark(['api', 'GET', '/open-apis/im/v1/messages'])
     expect(larkCallStats()).toEqual({ total: 3, byCommand: { 'im +chat-list': 2, 'api GET': 1 } })
+  })
+  it('takes a round\'s calls and starts the next round from zero, so a restart cannot corrupt the split', async () => {
+    resetLarkCallStats()
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    vi.spyOn(commands, 'run').mockResolvedValue('{"ok":true,"data":{}}')
+    await commands.lark(['im', '+chat-list'])
+    await commands.lark(['api', 'GET', '/open-apis/im/v1/messages'])
+    expect(takeLarkCalls()).toEqual({ total: 2, byCommand: { 'im +chat-list': 1, 'api GET': 1 } })
+    expect(larkCallStats()).toEqual({ total: 0, byCommand: {} })
+    await commands.lark(['im', '+chat-list'])
+    expect(takeLarkCalls()).toEqual({ total: 1, byCommand: { 'im +chat-list': 1 } })
   })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
     await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')

@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { liveTicket, threadKey, type Thread, type Trigger } from '../core/index.ts'
 import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
-import { larkCallStats, validItems, type Commands, type Tally } from '../infra/commands.ts'
+import { takeLarkCalls, validItems, type Commands, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
 import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
   from './feishu-trigger.ts'
@@ -267,7 +267,6 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
   let lastChatSweep = 0
   let lastTopicSweep = 0
   let swept = new Map<string, number>()
-  let reportedCalls = larkCallStats().total
   while (!signal.aborted) {
     const config = enabled(ctx)
     if (!config) {
@@ -307,10 +306,10 @@ async function backfillLoop(ctx: SourceContext, signal: AbortSignal): Promise<vo
     for (const chatId of failures.keys()) if (!(chatId in chats)) failures.delete(chatId)
     const skipped = tally.skipped ? `; ${tally.skipped} unreadable messages skipped` : ''
     const retrying = errors.length ? `; ${errors.length} chat(s) failed this round, retrying` : ''
-    const calls = larkCallStats().total - reportedCalls
-    reportedCalls += calls
+    // The round takes what it spent: a process counter kept apart from the day's record drifted on every restart.
+    const { total: calls, byCommand } = takeLarkCalls()
     // Every round is accounted, not only a sweep round: the daily record is what quota decisions are read from later.
-    const { today } = signal.aborted ? { today: 0 } : noteFeishuCalls(ctx, calls)
+    const { today } = signal.aborted ? { today: 0 } : noteFeishuCalls(ctx, calls, byCommand)
     const read = calls ? `; ${calls} API calls this round, ${today} today` : `; ${today} API calls today`
     if (!signal.aborted) ctx.report('history', historyFailureHealth(failures, errors) ?? {
       state: 'ready', detail: `Configured groups and known direct chats recovered${skipped}${retrying}${read}`, at: new Date().toISOString() })
@@ -328,13 +327,14 @@ export function callDay(at: Date): string {
  * with the process, so the daily record is the only way to read quota use back afterwards; an idle round writes nothing
  * but its increment, which keeps both the store and the log sparse.
  */
-export function noteFeishuCalls(ctx: SourceContext, calls: number, at = new Date()): { today: number } {
+export function noteFeishuCalls(ctx: SourceContext, calls: number, byCommand: Record<string, number> = {}, at = new Date()): { today: number } {
   const key = KV.feishu.calls(callDay(at))
   const current = ctx.state.get(key) ?? { total: 0, rounds: 0, byCommand: {} }
-  const byCommand = { ...current.byCommand }
-  // The per-round split is not kept in memory, so only the total is exact; the split comes from the process counter.
-  for (const [name, count] of Object.entries(larkCallStats().byCommand)) byCommand[name] = Math.max(byCommand[name] ?? 0, count)
-  const next = { total: current.total + calls, rounds: current.rounds + 1, byCommand }
+  const split = { ...current.byCommand }
+  // Each round adds its own split, so the parts keep summing to the day's total instead of freezing on the largest
+  // value one process happened to reach.
+  for (const [name, count] of Object.entries(byCommand)) split[name] = (split[name] ?? 0) + count
+  const next = { total: current.total + calls, rounds: current.rounds + 1, byCommand: split }
   ctx.state.set(key, next)
   console.log(`[feishu] round ${next.rounds}: ${calls} API call(s), ${next.total} today (${callDay(at)})`)
   return { today: next.total }

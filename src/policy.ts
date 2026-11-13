@@ -107,6 +107,12 @@ export const PolicyConfigSchema = z.object({
 export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
   timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(120),
+  /**
+   * How long an unaddressed human message waits for the rest of its thought before its Eval starts, so that several
+   * bubbles carrying one meaning are judged together. A request that addresses the agent, a bot or a CI result never
+   * waits; 0 turns the window off.
+   */
+  quietSeconds: z.number().int().min(0).max(LIMITS.quietSeconds.max).default(0),
   model: RoleModelSchema.nullable().default(null),
   /** Routes the main Session falls back to, in order, when its model request fails on the provider side. */
   fallbacks: FallbackSchema,
@@ -223,6 +229,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope, options
   }
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
+    quietMs: settings.eval.quietSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor)

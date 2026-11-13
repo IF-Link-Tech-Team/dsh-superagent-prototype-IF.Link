@@ -18,7 +18,8 @@
     "./feishu-watch": "./lib/feishu-watch.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json",
-    "./clawchat-watch": "./lib/clawchat-watch.js"
+    "./clawchat-watch": "./lib/clawchat-watch.js",
+    "./scheduler-watch": "./lib/scheduler-watch.js"
   },
   "files": [
     "lib",

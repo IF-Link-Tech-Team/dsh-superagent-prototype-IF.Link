@@ -80,7 +80,8 @@ export class Engine {
       if (!liveTicket(ticket) && ticket.undelivered.length) this.repo.atomic(() => { this.tickets.wake(ticket.id) })
     }
     for (const thread of this.repo.threads.active()) {
-      if (thread.pending.length && !thread.evaluating) this.repo.atomic(() => { this.evals.start(thread.key, policy) })
+      if (!thread.pending.length || thread.evaluating || this.evals.waits(thread, policy)) continue
+      this.repo.atomic(() => { this.evals.start(thread.key, policy) })
     }
   }
 

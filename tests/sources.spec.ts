@@ -44,7 +44,7 @@ function host(overrides: Partial<SourceContextDeps> = {}) {
   const receive = vi.fn(async (trigger: Trigger) => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   // Record outbound messages in the store without sending them.
   const parts: SourceContextDeps = { store, engine, outbox: { send: message => { store.receipts.add(message) } }, commands, sources, deployment,
-    ready: Promise.resolve(), configured: () => true, receive, ...overrides }
+    ready: Promise.resolve(), configured: () => true, receive, activity: () => ({}), ...overrides }
   // The Sources' functions take the context; plugin entries and kind callbacks take the host, which builds each kind's context.
   const value = { ...parts, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(parts, kind) }
   const context = sourceContextOf(parts, { kind: 'feishu', health: ['github', 'feishu', 'history'] })
@@ -183,14 +183,27 @@ describe('feishu source', () => {
     resetLarkCallStats()
     const h = host()
     const at = new Date('2026-11-13T10:00:00+08:00')
-    expect(noteFeishuCalls(h, 3, at).today).toBe(3)
-    expect(noteFeishuCalls(h, 4, at).today).toBe(7)
+    expect(noteFeishuCalls(h, 3, {}, at).today).toBe(3)
+    expect(noteFeishuCalls(h, 4, {}, at).today).toBe(7)
     const record = h.store.get<{ total: number; rounds: number }>('feishu-calls:2026-11-13')!
     expect(record.total).toBe(7)
     expect(record.rounds).toBe(2)
     // A new local day starts a new record rather than adding to yesterday's.
-    expect(noteFeishuCalls(h, 1, new Date('2026-11-14T00:30:00+08:00')).today).toBe(1)
+    expect(noteFeishuCalls(h, 1, {}, new Date('2026-11-14T00:30:00+08:00')).today).toBe(1)
     expect(h.store.get<{ total: number }>('feishu-calls:2026-11-14')!.total).toBe(1)
+    h.store.close()
+  })
+  it('adds each round\'s per-command counts instead of keeping the largest, so the split sums to the total', () => {
+    resetLarkCallStats()
+    const h = host()
+    const at = new Date('2026-11-13T10:00:00+08:00')
+    noteFeishuCalls(h, 2, { 'api GET': 2 }, at)
+    noteFeishuCalls(h, 3, { 'api GET': 1, 'im +chat-list': 2 }, at)
+    const record = h.store.get<{ total: number; byCommand: Record<string, number> }>('feishu-calls:2026-11-13')!
+    expect(record.total).toBe(5)
+    expect(record.byCommand).toEqual({ 'api GET': 3, 'im +chat-list': 2 })
+    // The split is what a quota decision reads, so it has to agree with the total it is drawn beside.
+    expect(Object.values(record.byCommand).reduce((sum, count) => sum + count, 0)).toBe(record.total)
     h.store.close()
   })
   it('reads every sweep cadence as minutes, so an unset environment cannot turn a round into a tight loop', () => {
@@ -1223,7 +1236,8 @@ describe('feishu event consumer', () => {
     const health = board.all
     const commands = new Commands(() => deployment, {}, controller.signal)
     const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true,
-      receive: (trigger: Trigger) => engine.receive(trigger) }
+      activity: () => ({}),
+    receive: (trigger: Trigger) => engine.receive(trigger) }
     const turnOff = () => store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: false, config: { chats: [] } } } }))
     return { ctx: sourceContextOf(deps, feishuKind), health, store, turnOff }
   }

@@ -373,6 +373,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
 | `src/sources/clawchat.ts` | The ClawChat kind and plugin entry, exported as `./clawchat-watch`: pairing from the owner's code, the live connection, and the Channel that replies through it |
+| `src/sources/scheduler.ts` | The Scheduler kind and plugin entry, exported as `./scheduler-watch`: turns the local clock into senderless Triggers confined to `meta.allowRules`, and sends results through `+messages-send` |
+| `src/sources/scheduler-job.ts` | The Scheduler's pure rules: schedule shapes with their next and last occurrence, the change stamp, the heartbeat judgement, and the index card a heartbeat reads |
 | `src/sources/clawchat-protocol.ts` | The ClawChat agent-side protocol: invite redemption and token refresh, the Protocol v2 WebSocket with its heartbeat and acks, and the frames as inbound messages |
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
@@ -412,6 +414,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | --- | --- |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
+| `tests/scheduler-tick.spec.ts` | One pass of the Scheduler's clock on a fake Source context: firing a due job once and never twice, skipping a job with no chat or one switched off, not reporting a window missed while the service was down, retrying a launch the Engine refused, and the heartbeat's quiet gate, throttle, night window, card and memory note |
+| `tests/scheduler-job.spec.ts` | The Scheduler's pure rules: zone-correct wall clocks, next and last occurrence per schedule shape, window identity, the change stamp, the heartbeat judgement, and the card's blocks and ceiling |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |

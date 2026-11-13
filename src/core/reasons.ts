@@ -26,6 +26,7 @@ export const REASONS = {
   gestureObserved: 'Observe mode: would react ({intent}, score {score})',
   gestureBudget: 'This chat already had its gestures for now; this one is recorded only',
   gestureOff: 'Social reactions are off',
+  heartbeatQuiet: 'Heartbeat: the changes since the last look are nothing a person would act on',
 } as const
 export type ReasonCode = keyof typeof REASONS
 /** Reason code and template values; `triggerId` identifies the trigger in a batch that the reason applies to. */

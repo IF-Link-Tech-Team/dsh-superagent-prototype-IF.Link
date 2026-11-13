@@ -3,7 +3,7 @@ import type { EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SetupProblem } from '../setup.ts'
-import type { SourceContext } from '../sources/host.ts'
+import type { Activity, SourceContext } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Outbox } from './outbox.ts'
 import type { Store } from './store.ts'
@@ -24,6 +24,8 @@ export interface SourceContextDeps {
   readonly feishuProblem?: SetupProblem | undefined
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
+  /** Movement in the domain, maintained by the Runtime as events are emitted. */
+  activity(): Activity
 }
 
 /**
@@ -58,9 +60,11 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       describe: (key, description) => store.threads.describe(key, description),
       patch: (key, meta) => { store.threads.patchMeta(key, meta) },
     },
+    activity: () => deps.activity(),
     tickets: {
       get: id => store.tickets.get(id),
       open: () => store.tickets.open(),
+      list: () => store.tickets.list(),
       bindThread: (id, thread, own) => { deps.engine.bindThread(id, thread, own) },
       threadClosed: (thread, outcome, at) => { deps.engine.threadClosed(thread, outcome, at) },
     },
