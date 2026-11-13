@@ -56,14 +56,15 @@ export function transient(error: unknown): boolean {
 }
 /** Appends a stable 12-character ticket ID suffix to a validated English worktree name. */
 const ticketWorktreeName = (name: string, id: string): string => `${WorktreeNameSchema.parse(name)}-${id.slice(0, 12)}`
-/** A memory file a ticket copies; anything else, a path traversal included, is not one. */
-const MEMORY_FILE = /^[A-Za-z0-9_-]+\.md$/
+/** The team memory files a ticket copies: its facts and conventions, not the folder's own guide or the review protocol. */
+const SNAPSHOT_FILES = ['TEAM.md', 'PROJECTS.md', 'PEOPLE.md'] as const
 /**
  * Copy the team memory files into a ticket's `memory/`, so its worker reads one snapshot for the whole ticket.
  * A deployment that keeps no memory, or a directory that is not there, leaves the ticket without one rather than failing its launch.
  */
 export async function copyMemory(from: string, to: string): Promise<void> {
-  const names = (await readdir(from).catch(() => [] as string[])).filter(name => MEMORY_FILE.test(name))
+  const present = new Set(await readdir(from).catch(() => [] as string[]))
+  const names = SNAPSHOT_FILES.filter(name => present.has(name))
   if (names.length === 0) return
   await mkdir(to, { recursive: true })
   await Promise.all(names.map(name => copyFile(join(from, name), join(to, name))))

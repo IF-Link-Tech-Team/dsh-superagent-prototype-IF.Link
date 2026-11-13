@@ -184,6 +184,7 @@ memory/drafts/
 ### 输入
 
 1. `drafts/inbox/` 里的草稿（先读目录和头部，再挑正文；预算 40,000 字符）；
+1b. **本期它收到的群消息**（`scripts/memory-messages.sh <起> <止>`，先看各群条数再挑群读）——这就是"它每天在群里看到的上下文"。两天的量约 1,300–1,500 条，必须先汇总再下钻；比事后用 `lark-user` 重搜更全、更快。
 2. L0 原文，只用于**校验**（库只读 + `lark-user` 搜群/文档）；
 3. 当前 TEAM、PROJECTS 全文；
 4. journal 索引 + 最近两期（接上时间线，避免重复）；
@@ -350,7 +351,7 @@ IF.Lab 512｜bot 游乐场 439｜Meetup 229｜部署 158｜技术组 126｜待�
 | `copyMemory`（`src/executor/dsh.ts`） | 复制 TEAM/PROJECTS/PEOPLE | 不动（**不加新文件**） |
 | `RESOURCES`（`src/app/resources.ts`） | `memory`、`memory/<f>`、`journal`、`journal/<f>` | 不动；Dreaming 用 bash 直读草稿，不需要新资源 |
 | `memory-commit.sh` | 所有写入的唯一闸门 | 只服务 L2/L3；草稿直写（不进闸门）；**PROJECTS 6000→8000、两日 journal 600→1500**（2026-11-12） |
-| `memory/HEADINGS.md` | 无 | 新增受控标题词表；Dreaming 只提议、人确认后才加行 |
+| `memory/HEADINGS.md` | 无 | 新增**可演进**词表：Dreaming 可自行加行/改名/改状态并留痕，合并与删行要人确认 |
 | `scripts/memory-timeline.sh` | 无 | 新增：按词表带别名，把某项目的历史小节拼成时间线 |
 | `memory/REVIEW.md` | 复盘作业书 | 退役，换成 `memory/DRAFT.md`（Worker 写草稿的规则，≤1,500 字符） |
 | `journal-work/AGENTS.md` | journal 记录员作业书 | 换成 `dream-work/AGENTS.md`（取材 + 校正 + 六动作 + 归档） |
