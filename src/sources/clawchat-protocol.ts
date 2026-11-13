@@ -226,6 +226,8 @@ export class ClawChatConnection {
   private readyAt = 0
   private readonly acks = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
   private seq = 0
+  /** Counts sockets so a stale close handler cannot touch the connection that replaced it. */
+  private generation = 0
 
   constructor(private identity: ClawChatIdentity, private readonly handlers: {
     onInbound: (message: ClawChatInbound) => void
@@ -297,22 +299,38 @@ export class ClawChatConnection {
 
   private traceId(kind: string): string { this.seq += 1; return `dsh-${kind}-${String(this.seq).padStart(6, '0')}` }
 
-  /** One socket's whole life: handshake, then frames until it closes. */
+  /**
+   * One socket's whole life: handshake, then frames until it closes.
+   *
+   * The returned promise settles only when this socket is gone, never at `hello-ok`: resolving there would send the
+   * run loop straight back into `connect()` while the accepted socket was still open, and the server answers a second
+   * session for the same device by taking the first one over (close 4001) — a self-inflicted takeover loop.
+   */
   private connect(signal: AbortSignal): Promise<void> {
+    const generation = ++this.generation
     return new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(CLAWCHAT_WS)
       this.socket = socket
       let settled = false
-      const handshake = setTimeout(() => { if (!settled) { settled = true; this.closeSocket(); reject(new Error('ClawChat handshake timed out')) } }, HANDSHAKE_TIMEOUT_MS)
+      let accepted = false
+      const handshake = setTimeout(() => {
+        if (settled || accepted) return
+        settled = true
+        this.closeSocket()
+        reject(new Error('ClawChat handshake timed out'))
+      }, HANDSHAKE_TIMEOUT_MS)
       const fail = (error: Error): void => { if (settled) return; settled = true; clearTimeout(handshake); reject(error) }
-      const done = (): void => { if (settled) return; settled = true; clearTimeout(handshake); this.backoff = 0; this.attempt = 1; resolve() }
       socket.addEventListener('open', () => this.handlers.log.info('clawchat: socket open'))
-      socket.addEventListener('error', () => fail(new Error('ClawChat socket error')))
+      socket.addEventListener('error', () => { if (!accepted) fail(new Error('ClawChat socket error')) })
       socket.addEventListener('close', (event) => {
-        this.clearTimers()
-        if (!settled) fail(new Error(`ClawChat socket closed before the handshake (${event.code})`))
-        else if (!this.closed) { this.handlers.onHealth('error', `socket closed (${event.code})`); resolve() }
-        else resolve()
+        // A stale socket's close must not clear the timers of the connection that replaced it.
+        if (generation === this.generation) this.clearTimers()
+        if (!accepted) { fail(new Error(`ClawChat socket closed before the handshake (${event.code})`)); return }
+        if (settled) return
+        settled = true
+        clearTimeout(handshake)
+        if (!this.closed) this.handlers.onHealth('error', `socket closed (${event.code}${event.reason ? `: ${event.reason}` : ''})`)
+        resolve()
       })
       socket.addEventListener('message', (event) => {
         let frame: Record<string, unknown>
@@ -332,10 +350,12 @@ export class ClawChatConnection {
           const payload = (frame.payload ?? {}) as Record<string, unknown>
           const echoed = typeof payload.device_id === 'string' && payload.device_id ? payload.device_id : undefined
           if (echoed && echoed !== this.identity.wsDeviceId) this.handlers.onIdentity({ ...this.identity, wsDeviceId: echoed })
+          accepted = true
+          clearTimeout(handshake)
           this.backoff = 0; this.attempt = 1; this.readyAt = Date.now()
           this.handlers.onHealth('ready', 'Connected to ClawChat')
           this.startHeartbeat()
-          done()
+          // Deliberately not resolved here: the run loop must wait for this socket to close before reconnecting.
           return
         }
         if (name === 'hello-fail') {
