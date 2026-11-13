@@ -63,6 +63,16 @@ policy.sources.clawchat.admission = {
   所以我们的 Trigger 一律记 `human: true`——"机器人消息也进研判"因此是自动成立的，
   代价是另一个 Agent 的一句话，如果 @ 了我们，也会被当成明确请求。
 
+通道全开还不够：第一批群消息进了研判，但模型自己判成"开场介绍语，没有请求、决定或待办，无需介入"。
+原因是整套提示词是照着"交付型 Agent"写的——`dispatch` 里明写 ignore 用于「ordinary discussion」，
+`communication` 里反复强调"没有可交付的东西就不发消息"。
+
+要它真的聊起来，得给提示词加一段明确的授权。2026-11-13 在团队提示词的 `communication` 末尾加了
+「Conversational channels (ClawChat)」一节：在 ClawChat 里，招呼、道谢、接梗、闲聊都用
+`orchestrator_reply purpose=answer` 回一句，然后把 Trigger 判成 ignore（理由写回了什么）；
+不开工单、不写进展报告、一条消息最多回一次；并明写**不要带到飞书和 GitHub**上去。
+这段在面板的「提示词」里能改也能回滚。
+
 ## 四、协议里几个必须踩准的点
 
 都写在 `clawchat-protocol.ts` 的注释里，这里只列容易错的：
